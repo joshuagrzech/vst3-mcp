@@ -85,6 +85,23 @@ Plans:
 Plans:
 - [ ] 04-01-PLAN.md — Six MCP parameter tools (get_plugin_info, list_params, get_param, set_param, batch_set) plus integration tests
 
+### Phase 04.1: Host plugin editor window (INSERTED)
+
+**Goal:** The host displays the plugin's editor window so users can see and interact with the plugin GUI while AI controls parameters via MCP
+**Depends on:** Phase 4
+**Requirements:** GUI-03 (brought forward from v2)
+**Success Criteria** (what must be TRUE):
+  1. User can call open_editor MCP tool and the plugin's GUI window appears on screen
+  2. Plugin editor displays at the correct size queried from IPlugView::getSize
+  3. Plugin UI is interactive (responds to mouse clicks, keyboard input, shows real-time updates)
+  4. Plugin child window is embedded inside the host's parent window (not floating separately)
+  5. Window closes gracefully when user clicks the close button, and the MCP tool returns successfully
+**Plans:** 2 plans
+
+Plans:
+- [ ] 04.1-01-PLAN.md — GUI foundation with winit window, IPlugView lifecycle, and open_editor MCP tool
+- [ ] 04.1-02-PLAN.md — Linux::IRunLoop implementation and XEmbed protocol for embedded, interactive plugin UIs
+
 ### Phase 5: Focus Mode
 **Goal**: Only user-selected parameters are exposed to AI, reducing noise from hundreds of irrelevant controls
 **Depends on**: Phase 4
