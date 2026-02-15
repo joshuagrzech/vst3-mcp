@@ -94,10 +94,10 @@ Plans:
   2. A config file maps plugin classId to a set of exposed parameter IDs, so different plugins have independent Focus Mode settings
   3. Without any config file, `list_params` returns all non-read-only parameters (sensible default)
   4. Modifying the Focus Mode config and reloading changes which parameters appear in `list_params` without restarting the system
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 05-01: TBD
+- [ ] 05-01-PLAN.md — FocusConfig struct, JSON-based parameter filtering, and reload_focus_config tool
 
 ### Phase 6: State Management
 **Goal**: Child plugin presets can be saved to disk and restored, preserving exact parameter state
