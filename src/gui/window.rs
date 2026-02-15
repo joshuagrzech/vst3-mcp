@@ -8,7 +8,7 @@ use std::ffi::c_void;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 use tracing::{debug, error, info, warn};
@@ -34,6 +34,38 @@ use super::xembed::{self, XEmbedAtoms};
 
 /// The VST3 platform type string for X11 embedding.
 const PLATFORM_TYPE_X11: &[u8] = b"X11EmbedWindowID\0";
+
+// #region agent log
+fn agent_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data: serde_json::Value,
+) {
+    use std::io::Write;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "id": format!("log_{}_{}", std::process::id(), ts),
+        "timestamp": ts,
+        "location": location,
+        "message": message,
+        "data": data,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/josh/Developer/vst3-mcp/.cursor/debug.log")
+    {
+        let _ = writeln!(f, "{}", payload);
+    }
+}
+// #endregion
 
 /// State for the editor window once created.
 struct EditorState {
@@ -94,6 +126,18 @@ impl ApplicationHandler for EditorApp {
             return; // Already initialized
         }
 
+        // #region agent log
+        agent_log(
+            "pre-fix",
+            "H0",
+            "src/gui/window.rs:EditorApp::resumed",
+            "resumed called; creating editor state",
+            serde_json::json!({
+                "plugin_name": self.plugin_name,
+            }),
+        );
+        // #endregion
+
         match create_editor_state(
             event_loop,
             &self.plugin,
@@ -103,9 +147,27 @@ impl ApplicationHandler for EditorApp {
             Ok(state) => {
                 info!("Editor window created successfully");
                 self.state = Some(state);
+                // #region agent log
+                agent_log(
+                    "pre-fix",
+                    "H0",
+                    "src/gui/window.rs:EditorApp::resumed",
+                    "create_editor_state Ok",
+                    serde_json::json!({}),
+                );
+                // #endregion
             }
             Err(e) => {
                 error!("Failed to create editor window: {}", e);
+                // #region agent log
+                agent_log(
+                    "pre-fix",
+                    "H0",
+                    "src/gui/window.rs:EditorApp::resumed",
+                    "create_editor_state Err; exiting event loop",
+                    serde_json::json!({"error": e}),
+                );
+                // #endregion
                 event_loop.exit();
             }
         }
@@ -213,9 +275,33 @@ fn create_editor_state(
         .controller()
         .ok_or_else(|| "Plugin has no edit controller".to_string())?;
 
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H2",
+        "src/gui/window.rs:create_editor_state",
+        "about to call createView(editor)",
+        serde_json::json!({
+            "plugin_name": plugin_name,
+            "controller_ptr_is_null": controller.as_ptr().is_null(),
+        }),
+    );
+    // #endregion
+
     let plug_view: ComPtr<IPlugView> = unsafe {
         let view_ptr = controller.createView(b"editor\0".as_ptr() as *const i8);
         if view_ptr.is_null() {
+            // #region agent log
+            agent_log(
+                "pre-fix",
+                "H2",
+                "src/gui/window.rs:create_editor_state",
+                "createView returned null",
+                serde_json::json!({
+                    "plugin_name": plugin_name,
+                }),
+            );
+            // #endregion
             return Err("createView returned null -- plugin may not have an editor".to_string());
         }
         ComPtr::from_raw(view_ptr)
@@ -226,6 +312,18 @@ fn create_editor_state(
     let supported = unsafe {
         plug_view.isPlatformTypeSupported(PLATFORM_TYPE_X11.as_ptr() as *const i8)
     };
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H3",
+        "src/gui/window.rs:create_editor_state",
+        "checked isPlatformTypeSupported(X11EmbedWindowID)",
+        serde_json::json!({
+            "plugin_name": plugin_name,
+            "supported_result": supported,
+        }),
+    );
+    // #endregion
     if supported != kResultOk {
         return Err(format!(
             "Plugin doesn't support X11EmbedWindowID (returned {})",
@@ -267,6 +365,19 @@ fn create_editor_state(
 
     // Get X11 Window ID from winit
     let parent_window_id = get_x11_window_id(&window)?;
+
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H1",
+        "src/gui/window.rs:create_editor_state",
+        "created winit window and extracted X11 window id",
+        serde_json::json!({
+            "plugin_name": plugin_name,
+            "parent_window_id_hex": format!("{:08X}", parent_window_id),
+        }),
+    );
+    // #endregion
 
     info!(
         "Created host window {:08X} ({}x{}) for '{}'",
@@ -316,11 +427,37 @@ fn create_editor_state(
             PLATFORM_TYPE_X11.as_ptr() as *const i8,
         );
         if result != kResultOk {
+            // #region agent log
+            agent_log(
+                "pre-fix",
+                "H4",
+                "src/gui/window.rs:create_editor_state",
+                "IPlugView::attached failed",
+                serde_json::json!({
+                    "plugin_name": plugin_name,
+                    "parent_window_id_hex": format!("{:08X}", parent_window_id),
+                    "result": result,
+                }),
+            );
+            // #endregion
             // Clean up on failure
             plug_view.setFrame(std::ptr::null_mut());
             return Err(format!("IPlugView::attached failed with code {}", result));
         }
     }
+
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H5",
+        "src/gui/window.rs:create_editor_state",
+        "IPlugView::attached succeeded; waiting for CreateNotify child window",
+        serde_json::json!({
+            "plugin_name": plugin_name,
+            "parent_window_id_hex": format!("{:08X}", parent_window_id),
+        }),
+    );
+    // #endregion
 
     info!(
         "Plugin editor attached to X11 window {:08X}",
@@ -353,6 +490,21 @@ fn get_x11_window_id(window: &Window) -> Result<u32, String> {
         .window_handle()
         .map_err(|e| format!("Failed to get window handle: {}", e))?;
 
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H1",
+        "src/gui/window.rs:get_x11_window_id",
+        "observed raw window handle backend",
+        serde_json::json!({
+            "raw_handle_debug": format!("{:?}", handle.as_raw()),
+            "wayland_display_set": std::env::var("WAYLAND_DISPLAY").is_ok(),
+            "x11_display": std::env::var("DISPLAY").ok(),
+            "winit_backend": std::env::var("WINIT_UNIX_BACKEND").ok(),
+        }),
+    );
+    // #endregion
+
     match handle.as_raw() {
         raw_window_handle::RawWindowHandle::Xlib(xlib) => {
             Ok(xlib.window as u32)
@@ -371,48 +523,149 @@ fn poll_x11_events(state: &mut EditorState) {
             Ok(Some(event)) => {
                 match event {
                     x11rb::protocol::Event::CreateNotify(create) => {
-                        if create.parent == state.parent_window_id
-                            && state.plugin_window_id.is_none()
-                        {
+                        if create.parent == state.parent_window_id {
                             let child_id = create.window;
-                            state.plugin_window_id = Some(child_id);
+                            let prev_child = state.plugin_window_id;
+                            if state.plugin_window_id.is_none() {
+                                state.plugin_window_id = Some(child_id);
+                            }
 
                             info!(
                                 "Plugin created child window {:08X} inside parent {:08X}",
                                 child_id, state.parent_window_id
                             );
 
-                            // Complete XEmbed handshake
-                            if let Err(e) = xembed::send_embedded_notify(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
+                            // #region agent log
+                            let map_state = match state.x11_conn.get_window_attributes(child_id) {
+                                Ok(cookie) => match cookie.reply() {
+                                    Ok(r) => format!("{:?}", r.map_state),
+                                    Err(e) => format!("reply_error: {}", e),
+                                },
+                                Err(e) => format!("conn_error: {}", e),
+                            };
+
+                            let xembed_info: Option<(u32, u32)> = match state.x11_conn.get_property(
+                                false,
                                 child_id,
-                                state.parent_window_id,
+                                state.xembed_atoms._XEMBED_INFO,
+                                state.xembed_atoms._XEMBED_INFO,
+                                0,
+                                2,
                             ) {
-                                warn!("Failed to send XEMBED_EMBEDDED_NOTIFY: {}", e);
-                            } else {
-                                debug!("Sent XEMBED_EMBEDDED_NOTIFY to {:08X}", child_id);
+                                Ok(cookie) => match cookie.reply() {
+                                    Ok(r) => {
+                                        if let Some(mut it) = r.value32() {
+                                            let version = it.next();
+                                            let flags = it.next();
+                                            match (version, flags) {
+                                                (Some(v), Some(f)) => Some((v, f)),
+                                                _ => None,
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    Err(_) => None,
+                                },
+                                Err(_) => None,
+                            };
+
+                            agent_log(
+                                "pre-fix",
+                                "H10",
+                                "src/gui/window.rs:poll_x11_events",
+                                "CreateNotify under parent; inspecting map state + _XEMBED_INFO",
+                                serde_json::json!({
+                                    "parent_window_id_hex": format!("{:08X}", state.parent_window_id),
+                                    "child_window_id_hex": format!("{:08X}", child_id),
+                                    "prev_tracked_child_window_id_hex": prev_child.map(|w| format!("{:08X}", w)),
+                                    "now_tracked_child_window_id_hex": state.plugin_window_id.map(|w| format!("{:08X}", w)),
+                                    "create_x": create.x,
+                                    "create_y": create.y,
+                                    "create_width": create.width,
+                                    "create_height": create.height,
+                                    "override_redirect": create.override_redirect,
+                                    "child_map_state": map_state,
+                                    "xembed_info": xembed_info.map(|(version, flags)| serde_json::json!({
+                                        "version": version,
+                                        "flags": flags,
+                                        "flag_mapped": (flags & 1) != 0
+                                    })),
+                                }),
+                            );
+                            // #endregion
+
+                            // Only do the initial XEmbed handshake for the first tracked child.
+                            // If the plugin creates additional children later, we'll log them first
+                            // (and decide how to handle them based on evidence).
+                            if prev_child.is_none() {
+                                // Complete XEmbed handshake
+                                if let Err(e) = xembed::send_embedded_notify(
+                                    &state.x11_conn,
+                                    &state.xembed_atoms,
+                                    child_id,
+                                    state.parent_window_id,
+                                ) {
+                                    warn!("Failed to send XEMBED_EMBEDDED_NOTIFY: {}", e);
+                                } else {
+                                    debug!("Sent XEMBED_EMBEDDED_NOTIFY to {:08X}", child_id);
+                                }
+
+                                // Send window activate and focus
+                                let _ = xembed::send_window_activate(
+                                    &state.x11_conn,
+                                    &state.xembed_atoms,
+                                    child_id,
+                                );
+                                let _ = xembed::send_focus_in(
+                                    &state.x11_conn,
+                                    &state.xembed_atoms,
+                                    child_id,
+                                );
+
+                                state.xembed_complete = true;
+                                info!("XEmbed handshake complete for child {:08X}", child_id);
                             }
-
-                            // Send window activate and focus
-                            let _ = xembed::send_window_activate(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
-                                child_id,
-                            );
-                            let _ = xembed::send_focus_in(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
-                                child_id,
-                            );
-
-                            state.xembed_complete = true;
-                            info!("XEmbed handshake complete for child {:08X}", child_id);
                         }
                     }
-                    x11rb::protocol::Event::MapNotify(_) => {
+                    x11rb::protocol::Event::ConfigureNotify(cfg) => {
+                        // #region agent log
+                        if cfg.window == state.parent_window_id
+                            || state.plugin_window_id.is_some_and(|w| w == cfg.window)
+                        {
+                            agent_log(
+                                "pre-fix",
+                                "H10",
+                                "src/gui/window.rs:poll_x11_events",
+                                "ConfigureNotify (position/size change)",
+                                serde_json::json!({
+                                    "window_id_hex": format!("{:08X}", cfg.window),
+                                    "x": cfg.x,
+                                    "y": cfg.y,
+                                    "width": cfg.width,
+                                    "height": cfg.height,
+                                    "above_sibling": cfg.above_sibling,
+                                }),
+                            );
+                        }
+                        // #endregion
+                    }
+                    x11rb::protocol::Event::MapNotify(map) => {
                         // Child window mapped -- ensure it's visible
                         debug!("MapNotify received");
+                        if state.plugin_window_id.is_some_and(|w| w == map.window) {
+                            // #region agent log
+                            agent_log(
+                                "pre-fix",
+                                "H9",
+                                "src/gui/window.rs:poll_x11_events",
+                                "MapNotify for plugin child window",
+                                serde_json::json!({
+                                    "child_window_id_hex": format!("{:08X}", map.window),
+                                }),
+                            );
+                            // #endregion
+                        }
                     }
                     _ => {
                         // Ignore other X11 events
@@ -422,6 +675,17 @@ fn poll_x11_events(state: &mut EditorState) {
             Ok(None) => break, // No more events
             Err(e) => {
                 warn!("X11 poll_for_event error: {}", e);
+                // #region agent log
+                agent_log(
+                    "pre-fix",
+                    "H5",
+                    "src/gui/window.rs:poll_x11_events",
+                    "x11_conn.poll_for_event error",
+                    serde_json::json!({
+                        "error": e.to_string(),
+                    }),
+                );
+                // #endregion
                 break;
             }
         }
@@ -508,24 +772,117 @@ pub fn open_editor_window(
     plugin_name: String,
 ) -> Result<(), String> {
     info!("Opening editor window for '{}'", plugin_name);
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H0",
+        "src/gui/window.rs:open_editor_window",
+        "open_editor_window entry",
+        serde_json::json!({
+            "plugin_name": plugin_name,
+            "wayland_display_set": std::env::var("WAYLAND_DISPLAY").is_ok(),
+            "x11_display": std::env::var("DISPLAY").ok(),
+            "winit_backend": std::env::var("WINIT_UNIX_BACKEND").ok(),
+        }),
+    );
+    // #endregion
 
     // Create shared run loop (used by both IPlugFrame and event loop)
     let runloop = Arc::new(HostRunLoop::new());
 
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H0",
+        "src/gui/window.rs:open_editor_window",
+        "HostRunLoop created; about to create EventLoop",
+        serde_json::json!({}),
+    );
+    // #endregion
+
     // Create winit event loop
-    let event_loop = EventLoop::new()
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H6",
+        "src/gui/window.rs:open_editor_window",
+        "building winit EventLoop via EventLoopBuilder",
+        serde_json::json!({}),
+    );
+    // #endregion
+    let mut builder = EventLoop::builder();
+
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H1",
+        "src/gui/window.rs:open_editor_window",
+        "forcing winit X11 backend (XEmbed requires X11)",
+        serde_json::json!({}),
+    );
+    // #endregion
+
+    // On Linux, allow EventLoop creation off the main thread and force X11 so we can
+    // obtain an X11 window ID for `X11EmbedWindowID`.
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        builder.with_x11().with_any_thread(true);
+    }
+
+    let event_loop = builder
+        .build()
         .map_err(|e| format!("Failed to create event loop: {}", e))?;
+
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H0",
+        "src/gui/window.rs:open_editor_window",
+        "EventLoopBuilder::build Ok",
+        serde_json::json!({}),
+    );
+    // #endregion
 
     // Set control flow: poll continuously for timer/FD dispatch
     event_loop.set_control_flow(ControlFlow::Poll);
+
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H0",
+        "src/gui/window.rs:open_editor_window",
+        "set_control_flow(ControlFlow::Poll) applied",
+        serde_json::json!({}),
+    );
+    // #endregion
 
     // Create application handler
     let mut app = EditorApp::new(plugin, plugin_name, runloop);
 
     // Run the event loop (blocks until window closes)
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H0",
+        "src/gui/window.rs:open_editor_window",
+        "about to run_app (enter event loop)",
+        serde_json::json!({}),
+    );
+    // #endregion
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("Event loop error: {}", e))?;
+
+    // #region agent log
+    agent_log(
+        "pre-fix",
+        "H0",
+        "src/gui/window.rs:open_editor_window",
+        "run_app returned Ok",
+        serde_json::json!({}),
+    );
+    // #endregion
 
     info!("Editor window closed");
     Ok(())

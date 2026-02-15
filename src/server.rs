@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -20,6 +21,38 @@ use vst3_mcp_host::hosting::plugin::PluginInstance;
 use vst3_mcp_host::hosting::scanner;
 use vst3_mcp_host::hosting::types::PluginInfo;
 use vst3_mcp_host::preset::state;
+
+// #region agent log
+fn agent_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data: serde_json::Value,
+) {
+    use std::io::Write;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "id": format!("log_{}_{}", std::process::id(), ts),
+        "timestamp": ts,
+        "location": location,
+        "message": message,
+        "data": data,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/josh/Developer/vst3-mcp/.cursor/debug.log")
+    {
+        let _ = writeln!(f, "{}", payload);
+    }
+}
+// #endregion
 
 // -- Tool input structs --
 
@@ -594,6 +627,21 @@ impl AudioHost {
                 .unwrap_or_else(|| "Unknown Plugin".to_string())
         };
 
+        // #region agent log
+        agent_log(
+            "pre-fix",
+            "H0",
+            "src/server.rs:open_editor",
+            "open_editor spawning GUI thread",
+            serde_json::json!({
+                "plugin_name": plugin_name,
+                "wayland_display_set": std::env::var("WAYLAND_DISPLAY").is_ok(),
+                "x11_display": std::env::var("DISPLAY").ok(),
+                "winit_backend": std::env::var("WINIT_UNIX_BACKEND").ok(),
+            }),
+        );
+        // #endregion
+
         // Clone Arc references for the GUI thread
         let plugin_arc = Arc::clone(&self.plugin);
 
@@ -603,22 +651,77 @@ impl AudioHost {
         // Spawn dedicated GUI thread (winit event loop is blocking
         // and incompatible with Tokio's async runtime)
         std::thread::spawn(move || {
-            match gui::open_editor_window(plugin_arc, plugin_name) {
-                Ok(()) => {
+            // #region agent log
+            agent_log(
+                "pre-fix",
+                "H0",
+                "src/server.rs:open_editor",
+                "GUI thread started; calling open_editor_window",
+                serde_json::json!({}),
+            );
+            // #endregion
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                gui::open_editor_window(plugin_arc, plugin_name)
+            }));
+
+            match result {
+                Ok(Ok(())) => {
                     info!("Editor window closed normally");
                     let _ = tx.send(Ok(()));
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::error!("Editor window failed: {}", e);
+                    // #region agent log
+                    agent_log(
+                        "pre-fix",
+                        "H0",
+                        "src/server.rs:open_editor",
+                        "open_editor_window returned Err",
+                        serde_json::json!({"error": e}),
+                    );
+                    // #endregion
                     let _ = tx.send(Err(format!("Editor error: {}", e)));
                 }
-            }
+                Err(panic_payload) => {
+                    // #region agent log
+                    agent_log(
+                        "pre-fix",
+                        "H0",
+                        "src/server.rs:open_editor",
+                        "GUI thread panicked while running open_editor_window",
+                        serde_json::json!({
+                            "panic": if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                (*s).to_string()
+                            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                                s.clone()
+                            } else {
+                                "non-string panic payload".to_string()
+                            }
+                        }),
+                    );
+                    // #endregion
+                    let _ = tx.send(Err("GUI thread panicked".to_string()));
+                }
+            };
         });
 
         // Block until window closes
         let result = rx
             .recv()
             .map_err(|_| "GUI thread panicked or disconnected".to_string())?;
+
+        // #region agent log
+        agent_log(
+            "pre-fix",
+            "H0",
+            "src/server.rs:open_editor",
+            "GUI thread returned to open_editor",
+            serde_json::json!({
+                "result_is_ok": result.is_ok(),
+                "result_err": result.as_ref().err().cloned(),
+            }),
+        );
+        // #endregion
 
         result.map(|()| {
             let response = serde_json::json!({

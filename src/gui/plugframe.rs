@@ -10,6 +10,7 @@
 //! lists both interfaces.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::debug;
 use vst3::com_scrape_types::ComWrapper;
@@ -19,6 +20,38 @@ use vst3::Steinberg::{
 };
 
 use super::runloop::HostRunLoop;
+
+// #region agent log
+fn agent_log(
+    run_id: &str,
+    hypothesis_id: &str,
+    location: &str,
+    message: &str,
+    data: serde_json::Value,
+) {
+    use std::io::Write;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "id": format!("log_{}_{}", std::process::id(), ts),
+        "timestamp": ts,
+        "location": location,
+        "message": message,
+        "data": data,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/josh/Developer/vst3-mcp/.cursor/debug.log")
+    {
+        let _ = writeln!(f, "{}", payload);
+    }
+}
+// #endregion
 
 /// Combined IPlugFrame + IRunLoop COM object.
 ///
@@ -59,6 +92,22 @@ impl IPlugFrameTrait for PlugFrame {
             let w = rect.right - rect.left;
             let h = rect.bottom - rect.top;
             debug!("IPlugFrame::resizeView requested: {}x{}", w, h);
+            // #region agent log
+            agent_log(
+                "pre-fix",
+                "H11",
+                "src/gui/plugframe.rs:PlugFrame::resizeView",
+                "plugin requested resize via IPlugFrame::resizeView",
+                serde_json::json!({
+                    "w": w,
+                    "h": h,
+                    "left": rect.left,
+                    "top": rect.top,
+                    "right": rect.right,
+                    "bottom": rect.bottom,
+                }),
+            );
+            // #endregion
         }
         // Accept all resize requests for now (fixed-size window in Phase 04.1)
         kResultOk

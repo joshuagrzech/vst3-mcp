@@ -1,0 +1,2 @@
+error: `cargo run` could not determine which binary to run. Use the `--bin` option to specify a binary, or the `default-run` manifest key.
+available binaries: agent-audio-integration-test, agent-audio-scanner, mcp_integration_test, vst3-mcp-host
