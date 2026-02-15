@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-15)
 
 **Core value:** AI can reliably read and write any exposed plugin parameter in real-time while the user makes music in their DAW
-**Current focus:** Phase 3 - Parameter Control (COMPLETE)
+**Current focus:** Phase 4 - MCP Server Tools (IN PROGRESS)
 
 ## Current Position
 
-Phase: 3 of 6 (Parameter Control)
-Plan: 2 of 2 in current phase (all plans complete)
+Phase: 4 of 6 (MCP Server Tools)
+Plan: 1 of 1 in current phase (all plans complete)
 Status: Phase Complete
-Last activity: 2026-02-15 -- Completed 03-02 (parameter control integration tests)
+Last activity: 2026-02-15 -- Completed 04-01 (MCP parameter tools and integration tests)
 
-Progress: [██████░░░░] 50%
+Progress: [████████░░] 67%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
+- Total plans completed: 7
 - Average duration: 9min
-- Total execution time: 0.90 hours
+- Total execution time: 1.0 hours
 
 **By Phase:**
 
@@ -30,10 +30,11 @@ Progress: [██████░░░░] 50%
 | 01-plugin-hosting | 2 | 34min | 17min |
 | 02-audio-processing | 2 | 11min | 6min |
 | 03-parameter-control | 2 | 8min | 4min |
+| 04-mcp-server-tools | 1 | 9min | 9min |
 
 **Recent Trend:**
-- Last 5 plans: 4min, 4min, 4min, 30min, 8min
-- Trend: accelerating (clean implementations, no deviations)
+- Last 5 plans: 4min, 4min, 30min, 8min, 9min
+- Trend: stable (consistent execution with protocol compliance fixes)
 
 *Updated after each plan completion*
 
@@ -68,6 +69,10 @@ Recent decisions affecting current work:
 - [03-02]: Max abs diff threshold 0.001 for parameter audibility testing (conservative, measurable)
 - [03-02]: 8 sweep steps sufficient for crash detection, zipper noise FFT analysis deferred
 - [03-02]: Tests skip gracefully ensuring CI passes without VST3 plugins installed
+- [04-01]: setProcessing is optional per VST3 spec - made non-fatal for plugins that don't implement it
+- [04-01]: MCP tools return JSON in content array with type=text per protocol spec
+- [04-01]: Five MCP tools expose parameter control (get_plugin_info, list_params, get_param, set_param, batch_set)
+- [04-01]: Integration test uses tools/call method and proper MCP handshake per 2024-11-05 spec
 
 ### Pending Todos
 
@@ -81,5 +86,5 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-15
-Stopped at: Completed 03-02-PLAN.md (parameter control integration tests) -- Phase 3 complete
+Stopped at: Completed 04-01-PLAN.md (MCP parameter tools and integration tests) -- Phase 4 complete
 Resume file: None
