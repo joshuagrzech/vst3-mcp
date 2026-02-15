@@ -63,11 +63,11 @@ Plans:
   3. Writing a parameter value via IParameterChanges and then re-processing audio produces an audibly different output compared to the default
   4. Read-only parameters (kIsReadOnly flag) are identified and excluded from write operations
   5. Parameter sweeps (gradual value changes across a buffer) produce smooth output without zipper noise or discontinuities
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: TBD
-- [ ] 03-02: TBD
+- [ ] 03-01-PLAN.md — IParameterChanges delivery, display strings, and flag filtering
+- [ ] 03-02-PLAN.md — Integration tests for all 5 success criteria
 
 ### Phase 4: MCP Server & Tools
 **Goal**: An AI agent (Claude) can connect via MCP and inspect/control the hosted plugin's parameters
