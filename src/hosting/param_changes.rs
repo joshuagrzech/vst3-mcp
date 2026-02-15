@@ -63,10 +63,10 @@ impl IParamValueQueueTrait for ParamValueQueue {
         if index >= 0 && (index as usize) < points.len() {
             let (offset, val) = points[index as usize];
             if !sample_offset.is_null() {
-                *sample_offset = offset;
+                unsafe { *sample_offset = offset; }
             }
             if !value.is_null() {
-                *value = val;
+                unsafe { *value = val; }
             }
             kResultOk
         } else {
@@ -77,7 +77,7 @@ impl IParamValueQueueTrait for ParamValueQueue {
     unsafe fn addPoint(&self, sample_offset: i32, value: ParamValue, index: *mut i32) -> i32 {
         self.add_point(sample_offset, value);
         if !index.is_null() {
-            *index = (self.points.borrow().len() - 1) as i32;
+            unsafe { *index = (self.points.borrow().len() - 1) as i32; }
         }
         kResultOk
     }
@@ -121,12 +121,11 @@ impl ParameterChanges {
             // but queues is borrowed. We drop the borrow and use unsafe to get
             // a pointer to the Vec's data, which is stable for the lifetime of self.
             drop(queues);
-            unsafe {
-                let queues_ptr = self.queues.as_ptr();
-                let queue = &(*queues_ptr)[idx];
-                queue.set_parameter_id(id);
-                Some(queue)
-            }
+            // Safety: queues_ptr is valid for the lifetime of self, and idx is in bounds
+            let queues_ptr = self.queues.as_ptr();
+            let queue = unsafe { &(&(*queues_ptr))[idx] };
+            queue.set_parameter_id(id);
+            Some(queue)
         } else {
             None // Exceeded capacity
         }
@@ -157,11 +156,12 @@ impl IParameterChangesTrait for ParameterChanges {
         }
     }
 
-    unsafe fn addParameterData(&self, id: &ParamID, index: *mut i32) -> *mut IParamValueQueue {
-        if let Some(queue) = self.add_parameter(*id) {
+    unsafe fn addParameterData(&self, id: *const ParamID, index: *mut i32) -> *mut IParamValueQueue {
+        let param_id = if !id.is_null() { unsafe { *id } } else { 0 };
+        if let Some(queue) = self.add_parameter(param_id) {
             let count = *self.active_count.borrow();
             if !index.is_null() {
-                *index = (count - 1) as i32;
+                unsafe { *index = (count - 1) as i32; }
             }
             if let Some(ptr) = queue.to_com_ptr::<IParamValueQueue>() {
                 ptr.as_ptr()

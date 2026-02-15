@@ -9,7 +9,8 @@ A headless Rust VST3 host that AI agents control through the [Model Context Prot
 - **Audio processing** — offline block-based rendering through any loaded VST3 plugin
 - **Multi-format input** — WAV, FLAC, MP3, OGG (via symphonia)
 - **Preset management** — save/load `.vstpreset` files with correct component+controller state sync
-- **MCP integration** — 5 tools exposed over stdio JSON-RPC
+- **Parameter control** — enumerate, read, and write plugin parameters with AI-accessible tools
+- **MCP integration** — 10 tools exposed over stdio JSON-RPC
 
 ## Requirements
 
@@ -130,6 +131,51 @@ Load a `.vstpreset` file into the currently loaded plugin.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | yes | Path to the .vstpreset file |
+
+### `get_plugin_info`
+
+Get the loaded plugin's identity (classId, name, vendor).
+
+No parameters required. Returns JSON with plugin metadata.
+
+### `list_params`
+
+List all writable parameters with their current values.
+
+No parameters required. Returns an array of parameters with `id`, `name`, `value` (normalized 0-1), and `display` (human-readable string like "3.5 dB").
+
+Filters out read-only and hidden parameters automatically.
+
+### `get_param`
+
+Get a single parameter's current value and display string.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | integer | yes | Parameter ID from list_params |
+
+Returns the parameter's normalized value [0.0, 1.0] and display string.
+
+### `set_param`
+
+Set a single parameter value. Changes are queued and applied in the next `process_audio` call.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | integer | yes | Parameter ID from list_params |
+| `value` | number | yes | Normalized value in range [0.0, 1.0] |
+
+Returns confirmation with the new display string.
+
+### `batch_set`
+
+Set multiple parameters atomically. All changes are validated before any are applied.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `changes` | array | yes | Array of objects with `id` and `value` fields |
+
+Changes are queued and applied together in the next `process_audio` call.
 
 ## Example Conversation
 

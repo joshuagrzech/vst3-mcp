@@ -1075,6 +1075,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hound",
+ "libc",
  "libloading",
  "rmcp",
  "schemars",
