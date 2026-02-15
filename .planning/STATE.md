@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-15)
 
 **Core value:** AI can reliably read and write any exposed plugin parameter in real-time while the user makes music in their DAW
-**Current focus:** Phase 4 - MCP Server Tools (IN PROGRESS)
+**Current focus:** Phase 4.1 - Host Plugin Editor Window (IN PROGRESS)
 
 ## Current Position
 
-Phase: 4 of 6 (MCP Server Tools)
-Plan: 1 of 1 in current phase (all plans complete)
+Phase: 4.1 of 6 (Host Plugin Editor Window)
+Plan: 1+2 of 2 in current phase (all plans complete)
 Status: Phase Complete
-Last activity: 2026-02-15 -- Completed 04-01 (MCP parameter tools and integration tests)
+Last activity: 2026-02-15 -- Completed 04.1-01+02 (plugin editor window with IPlugView, IRunLoop, XEmbed)
 
-Progress: [████████░░] 67%
+Progress: [████████░░] 72%
 
 ## Performance Metrics
 
@@ -31,6 +31,7 @@ Progress: [████████░░] 67%
 | 02-audio-processing | 2 | 11min | 6min |
 | 03-parameter-control | 2 | 8min | 4min |
 | 04-mcp-server-tools | 1 | 9min | 9min |
+| 04.1-editor-window | 2 | ~15min | ~8min |
 
 **Recent Trend:**
 - Last 5 plans: 4min, 4min, 30min, 8min, 9min
@@ -73,6 +74,12 @@ Recent decisions affecting current work:
 - [04-01]: MCP tools return JSON in content array with type=text per protocol spec
 - [04-01]: Five MCP tools expose parameter control (get_plugin_info, list_params, get_param, set_param, batch_set)
 - [04-01]: Integration test uses tools/call method and proper MCP handshake per 2024-11-05 spec
+- [04.1-01]: Combined IPlugFrame + IRunLoop on single COM object for correct queryInterface
+- [04.1-01]: Dedicated GUI thread (std::thread::spawn) because winit event loop is blocking
+- [04.1-01]: Fixed-size window for Phase 04.1 (resize deferred to avoid resize loop pitfall)
+- [04.1-02]: Raw COM pointer management with manual AddRef/Release for IRunLoop handlers
+- [04.1-02]: FD polling via polling crate integrated into winit AboutToWait event
+- [04.1-02]: XEmbed handshake via CreateNotify detection + EMBEDDED_NOTIFY message
 
 ### Roadmap Evolution
 
@@ -90,5 +97,5 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-15
-Stopped at: Completed 04-01-PLAN.md (MCP parameter tools and integration tests) -- Phase 4 complete
+Stopped at: Completed 04.1-01+02-PLAN.md (plugin editor window with IPlugView, IRunLoop, XEmbed) -- Phase 4.1 complete
 Resume file: None
