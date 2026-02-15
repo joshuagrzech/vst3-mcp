@@ -47,11 +47,11 @@ Plans:
   3. Stereo files process correctly with left/right channels preserved (no channel swap or mono collapse)
   4. The output file has the same sample rate as the input file, and the child plugin receives the correct sample rate during setup
   5. Buffer conversion between nih-plug and VST3 formats produces no audible artifacts (no clicks, pops, or silence gaps at buffer boundaries)
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: TBD
-- [ ] 02-02: TBD
+- [ ] 02-01-PLAN.md -- Fix process() bugs (bus count, ProcessContext, pre-allocation) and harden pipeline (denormals, sample rate errors)
+- [ ] 02-02-PLAN.md -- Integration tests verifying all 5 success criteria with real plugins
 
 ### Phase 3: Parameter Control
 **Goal**: All child plugin parameters can be enumerated, read, and written with sample-accurate automation via IParameterChanges
