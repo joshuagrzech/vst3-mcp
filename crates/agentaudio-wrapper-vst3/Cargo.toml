@@ -1,0 +1,22 @@
+[package]
+name = "agentaudio-wrapper-vst3"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+axum = "0.8"
+crossbeam-queue = "0.3.12"
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+rmcp = { version = "0.15.0", features = ["server", "macros", "transport-streamable-http-server"] }
+schemars = "1.2.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.49.0", features = ["full"] }
+tokio-util = "0.7"
+tracing = "0.1.44"
+uuid = { version = "1.21.0", features = ["v4"] }
+vst3-mcp-host = { path = "../.." }

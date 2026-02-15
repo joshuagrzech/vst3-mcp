@@ -678,6 +678,27 @@ impl PluginInstance {
         self.param_changes.push_back(ParameterChange { id, value });
     }
 
+    /// Apply a parameter value immediately on the controller thread.
+    ///
+    /// This mirrors values in plugin UI/state outside the audio callback
+    /// (e.g. when transport is idle). DSP automation still relies on
+    /// `queue_parameter_change()` + `process()` delivery via IParameterChanges.
+    pub fn set_parameter_immediate(&mut self, id: u32, value: f64) -> Result<(), HostError> {
+        let ctrl = self.controller.as_ref().ok_or_else(|| {
+            HostError::InvalidState("no edit controller available".to_string())
+        })?;
+
+        let result = unsafe { ctrl.setParamNormalized(id, value) };
+        if result != kResultOk {
+            return Err(HostError::InvalidState(format!(
+                "setParamNormalized({}, {}) failed with code {}",
+                id, value, result
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Get the number of parameters exposed by the plugin.
     pub fn get_parameter_count(&self) -> i32 {
         match &self.controller {
