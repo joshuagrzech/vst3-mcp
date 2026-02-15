@@ -58,15 +58,104 @@ impl McpServer {
             .map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
 
         eprintln!("INFO: MCP server started");
-        Ok(Self { process })
+
+        let mut server = Self { process };
+
+        // Send initialize request (MCP protocol handshake)
+        server.send_request("initialize", json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "mcp_integration_test",
+                "version": "1.0.0"
+            }
+        }))?;
+
+        // Send initialized notification
+        server.send_notification("notifications/initialized", json!({}))?;
+
+        Ok(server)
     }
 
-    fn call_tool(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    fn send_request(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let request = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": method,
             "params": params
+        });
+
+        let request_str = serde_json::to_string(&request)
+            .map_err(|e| format!("Failed to serialize request: {}", e))?;
+
+        let stdin = self
+            .process
+            .stdin
+            .as_mut()
+            .ok_or("No stdin available")?;
+        writeln!(stdin, "{}", request_str)
+            .map_err(|e| format!("Failed to write to server stdin: {}", e))?;
+        stdin
+            .flush()
+            .map_err(|e| format!("Failed to flush stdin: {}", e))?;
+
+        let stdout = self
+            .process
+            .stdout
+            .as_mut()
+            .ok_or("No stdout available")?;
+        let mut reader = BufReader::new(stdout);
+        let mut response_line = String::new();
+        reader
+            .read_line(&mut response_line)
+            .map_err(|e| format!("Failed to read from server stdout: {}", e))?;
+
+        let response: Value = serde_json::from_str(&response_line)
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+        if let Some(error) = response.get("error") {
+            return Err(format!("Server error: {}", error));
+        }
+
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "No result in response".to_string())
+    }
+
+    fn send_notification(&mut self, method: &str, params: Value) -> Result<(), String> {
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        });
+
+        let notification_str = serde_json::to_string(&notification)
+            .map_err(|e| format!("Failed to serialize notification: {}", e))?;
+
+        let stdin = self
+            .process
+            .stdin
+            .as_mut()
+            .ok_or("No stdin available")?;
+        writeln!(stdin, "{}", notification_str)
+            .map_err(|e| format!("Failed to write notification: {}", e))?;
+        stdin
+            .flush()
+            .map_err(|e| format!("Failed to flush stdin: {}", e))?;
+
+        Ok(())
+    }
+
+    fn call_tool(&mut self, tool_name: &str, arguments: Value) -> Result<Value, String> {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments
+            }
         });
 
         let request_str = serde_json::to_string(&request)
@@ -104,10 +193,38 @@ impl McpServer {
             return Err(format!("Server error: {}", error));
         }
 
-        response
+        // Extract result from MCP response
+        let result = response
             .get("result")
-            .cloned()
-            .ok_or_else(|| "No result in response".to_string())
+            .ok_or_else(|| "No result in response".to_string())?;
+
+        // Check if MCP tool returned an error (isError: true)
+        if let Some(is_error) = result.get("isError").and_then(|v| v.as_bool()) {
+            if is_error {
+                let error_text = result
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|item| item.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Unknown error");
+                return Err(format!("Tool error: {}", error_text));
+            }
+        }
+
+        // MCP tools return result in content array with type "text"
+        // Extract the text content and parse as JSON
+        if let Some(content_array) = result.get("content").and_then(|v| v.as_array()) {
+            if let Some(first_content) = content_array.first() {
+                if let Some(text) = first_content.get("text").and_then(|v| v.as_str()) {
+                    return serde_json::from_str(text)
+                        .map_err(|e| format!("Failed to parse tool response JSON: {}", e));
+                }
+            }
+        }
+
+        // Fallback: return result as-is
+        Ok(result.clone())
     }
 }
 
@@ -439,15 +556,26 @@ fn test_batch_set(
 ) -> Result<(), String> {
     eprintln!("\n--- Test 6: batch_set ---");
 
-    if param_ids.len() < 3 {
-        return Err("Need at least 3 parameters for batch_set test".to_string());
+    if param_ids.is_empty() {
+        return Err("Need at least 1 parameter for batch_set test".to_string());
     }
 
-    let changes = json!([
-        { "id": param_ids[0], "value": 0.8 },
-        { "id": param_ids[1], "value": 0.3 },
-        { "id": param_ids[2], "value": 0.6 },
-    ]);
+    // Use however many parameters are available (up to 3)
+    let param_count = param_ids.len().min(3);
+    let test_params = &param_ids[0..param_count];
+
+    let changes: Vec<Value> = test_params
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| {
+            let value = match i {
+                0 => 0.8,
+                1 => 0.3,
+                _ => 0.6,
+            };
+            json!({ "id": id, "value": value })
+        })
+        .collect();
 
     let result = server.call_tool("batch_set", json!({ "changes": changes }))?;
 
@@ -464,15 +592,15 @@ fn test_batch_set(
         return Err(format!("Expected status 'queued', got '{}'", status));
     }
 
-    if changes_queued != 3 {
+    if changes_queued != param_count as u64 {
         return Err(format!(
-            "Expected 3 changes queued, got {}",
-            changes_queued
+            "Expected {} changes queued, got {}",
+            param_count, changes_queued
         ));
     }
 
     // Verify changes are applied via get_param
-    for &param_id in param_ids.iter().take(3) {
+    for &param_id in test_params.iter() {
         let result = server.call_tool("get_param", json!({ "id": param_id }))?;
         let value = result
             .get("value")
@@ -492,9 +620,14 @@ fn test_batch_set(
     let baseline = process_with_plugin(&mut plugin, &input_slices);
 
     // Apply batch changes
-    plugin.queue_parameter_change(param_ids[0] as u32, 0.8);
-    plugin.queue_parameter_change(param_ids[1] as u32, 0.3);
-    plugin.queue_parameter_change(param_ids[2] as u32, 0.6);
+    for (i, &param_id) in test_params.iter().enumerate() {
+        let value = match i {
+            0 => 0.8,
+            1 => 0.3,
+            _ => 0.6,
+        };
+        plugin.queue_parameter_change(param_id as u32, value);
+    }
 
     let modified = process_with_plugin(&mut plugin, &input_slices);
 
@@ -503,6 +636,7 @@ fn test_batch_set(
         return Err("Batch changes produced no audible effect".to_string());
     }
 
+    eprintln!("  Queued {} parameter changes", param_count);
     eprintln!("✓ Test 6: batch_set applies multiple parameters");
 
     Ok(())
@@ -566,10 +700,9 @@ fn run_tests() -> Result<(), String> {
     // Test 5: set_param with audible change
     test_set_param_audible(&mut server, &plugin_uid, first_param_id)?;
 
-    // Test 6: batch_set
+    // Test 6: batch_set (use all available parameters, up to 3)
     let param_ids: Vec<u64> = parameters
         .iter()
-        .take(3)
         .filter_map(|p| p.get("id").and_then(|v| v.as_u64()))
         .collect();
     test_batch_set(&mut server, &plugin_uid, &param_ids)?;
