@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-02-15)
 ## Current Position
 
 Phase: 1 of 6 (Plugin Hosting)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-02-15 -- Roadmap created
+Plan: 1 of 2 in current phase
+Status: Executing
+Last activity: 2026-02-15 -- Completed 01-01 (crash-safe scanning + hardened teardown)
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 8%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0 hours
+- Total plans completed: 1
+- Average duration: 4min
+- Total execution time: 0.07 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 01-plugin-hosting | 1 | 4min | 4min |
 
 **Recent Trend:**
-- Last 5 plans: -
-- Trend: -
+- Last 5 plans: 4min
+- Trend: baseline
 
 *Updated after each plan completion*
 
@@ -44,6 +44,10 @@ Recent decisions affecting current work:
 
 - [Roadmap]: Offline MVP first, real-time DAW integration deferred to v2
 - [Roadmap]: 6 phases derived from 30 v1 requirements across 6 categories
+- [01-01]: Used std::process::Command + stdout JSON for scanner IPC
+- [01-01]: Arc<VstModule> stored in PluginInstance to enforce module lifetime structurally
+- [01-01]: ManuallyDrop for factory in VstModule to make drop order explicit before ExitDll
+- [01-01]: Option::take() in PluginInstance::Drop for COM pointer release ordering
 
 ### Pending Todos
 
@@ -57,5 +61,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-15
-Stopped at: Roadmap created, ready to plan Phase 1
+Stopped at: Completed 01-01-PLAN.md (crash-safe scanning + hardened teardown)
 Resume file: None
