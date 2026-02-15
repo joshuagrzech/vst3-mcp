@@ -6,6 +6,7 @@
 
 pub mod host_app;
 pub mod module;
+pub mod param_changes;
 pub mod plugin;
 pub mod scanner;
 pub mod types;

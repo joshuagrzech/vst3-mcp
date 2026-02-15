@@ -28,6 +28,7 @@ use vst3::Steinberg::{
 
 use super::host_app::{ComponentHandler, HostApp};
 use super::module::VstModule;
+use super::param_changes::{ParameterChanges, ParamValueQueue};
 use super::types::{
     BusDirection, BusInfo, BusType, HostError, ParamInfo, PluginState,
 };
@@ -62,6 +63,11 @@ pub struct PluginInstance {
 
     // Parameter change queue
     param_changes: VecDeque<ParameterChange>,
+
+    // Parameter change COM infrastructure
+    param_changes_impl: ComWrapper<ParameterChanges>,
+    param_queues: Vec<ComWrapper<ParamValueQueue>>,
+    max_params_per_block: usize,
 
     // Audio bus layout (populated during setup())
     num_input_buses: i32,
@@ -243,6 +249,9 @@ impl PluginInstance {
             _comp_connection: comp_connection,
             _ctrl_connection: ctrl_connection,
             param_changes: VecDeque::new(),
+            param_changes_impl: ParameterChanges::new(&vec![]),
+            param_queues: Vec::new(),
+            max_params_per_block: 0,
             num_input_buses: 0,
             num_output_buses: 0,
             aux_input_channel_counts: Vec::new(),
@@ -304,6 +313,13 @@ impl PluginInstance {
         // Store sample rate and reset sample position
         self.current_sample_rate = sample_rate;
         self.sample_position = 0;
+
+        // Pre-allocate parameter change infrastructure
+        self.max_params_per_block = 32;
+        self.param_queues = (0..self.max_params_per_block)
+            .map(|_| ParamValueQueue::new())
+            .collect();
+        self.param_changes_impl = ParameterChanges::new(&self.param_queues);
 
         // Query actual bus counts from the plugin
         self.num_input_buses = unsafe {
@@ -625,10 +641,19 @@ impl PluginInstance {
                 processContext: &mut context,
             };
 
-            // TODO: Deliver queued parameter changes via IParameterChanges
-            // For Phase 1, parameter changes via process() are deferred.
-            // Drain the queue to avoid unbounded growth.
-            self.param_changes.clear();
+            // Populate parameter changes from queue
+            self.param_changes_impl.clear();
+            while let Some(change) = self.param_changes.pop_front() {
+                if let Some(queue) = self.param_changes_impl.add_parameter(change.id) {
+                    queue.add_point(0, change.value); // Sample offset 0 = start of block
+                }
+            }
+
+            // Set inputParameterChanges in ProcessData
+            process_data.inputParameterChanges = self.param_changes_impl
+                .to_com_ptr::<vst3::Steinberg::Vst::IParameterChanges>()
+                .map(|p| p.as_ptr())
+                .unwrap_or(std::ptr::null_mut());
 
             let result = self.processor.process(&mut process_data);
             if result != kResultOk {
@@ -690,6 +715,27 @@ impl PluginInstance {
         match &self.controller {
             Some(ctrl) => unsafe { ctrl.getParamNormalized(id) },
             None => 0.0,
+        }
+    }
+
+    /// Get the human-readable display string for a parameter value.
+    pub fn get_parameter_display(&self, id: u32) -> Result<String, HostError> {
+        let ctrl = self.controller.as_ref()
+            .ok_or_else(|| HostError::InvalidState("no edit controller".to_string()))?;
+
+        let normalized_value = unsafe { ctrl.getParamNormalized(id) };
+
+        // Get human-readable string from plugin
+        let mut string128: [u16; 128] = [0; 128];
+        let result = unsafe {
+            ctrl.getParamStringByValue(id, normalized_value, &mut string128 as *mut _)
+        };
+
+        if result == kResultOk {
+            Ok(string128_to_string(&string128))
+        } else {
+            // Fallback: return normalized value as string
+            Ok(format!("{:.3}", normalized_value))
         }
     }
 
