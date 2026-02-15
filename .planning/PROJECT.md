@@ -12,7 +12,10 @@ Safe, conversational control of professional audio plugins for AI agents, with c
 
 ### Validated
 
-(None yet — ship to validate)
+- [ ] Worker process safely loads VST3 SDK (vst3-sys) and plugins — **HYPOTHESIS:** coupler-rs/vst3 maturity unknown, SDK 3.8.0 compat needs verification
+- [ ] Dynamic schema generation (scan plugin parameters at runtime → MCP tool JSON schema) — **HYPOTHESIS:** Novel approach, no precedent found
+- [ ] Focus mode ("wiggle") - list_parameters accepts .vstpreset mask, exposes only params that differ from default — **HYPOTHESIS:** Novel AI-specific feature, IUnitInfo adoption rate unknown
+- [ ] Demo conversation works end-to-end ("brighten this vocal" → success without manual intervention) — **HYPOTHESIS:** Full system validation target
 
 ### Active
 
@@ -20,14 +23,10 @@ Safe, conversational control of professional audio plugins for AI agents, with c
 - [ ] Plugin scanner that discovers VST3s and generates catalog with UIDs
 - [ ] Crash isolation (plugin crashes only kill worker, not supervisor)
 - [ ] Blocklist system (automatically skip plugins that previously crashed)
-- [ ] Worker process safely loads VST3 SDK (vst3-sys) and plugins
 - [ ] Offline audio processing pipeline (file in → VST process → file out)
-- [ ] Dynamic schema generation (scan plugin parameters at runtime → MCP tool JSON schema)
-- [ ] Focus mode ("wiggle") - list_parameters accepts .vstpreset mask, exposes only params that differ from default
 - [ ] Preset management (save/load .vstpreset files)
 - [ ] Transparent audio quality (preserve sample rate, bit depth, plugin native characteristics)
 - [ ] MCP integration over stdio (Claude can call tools, get results)
-- [ ] Demo conversation works end-to-end ("brighten this vocal" → success without manual intervention)
 
 ### Out of Scope
 
