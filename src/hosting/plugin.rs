@@ -483,15 +483,18 @@ impl PluginInstance {
         unsafe {
             let result = self.processor.setProcessing(1);
             if result != kResultOk {
-                return Err(HostError::ProcessingFailed(format!(
-                    "setProcessing(true) failed with code {}",
+                // setProcessing is optional in VST3 spec - some plugins don't implement it
+                // Log a warning but don't fail - plugin can still process audio
+                debug!(
+                    "setProcessing(true) returned code {} (optional, plugin may not implement it)",
                     result
-                )));
+                );
+            } else {
+                debug!("processing started");
             }
         }
 
         self.state = PluginState::Processing;
-        debug!("processing started");
         Ok(())
     }
 
