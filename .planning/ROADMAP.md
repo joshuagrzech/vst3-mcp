@@ -12,7 +12,7 @@ This roadmap delivers a headless Rust VST3 host that AI agents control through M
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Single-Plugin MVP** - Validate VST3 hosting in Rust and deliver working audio processing via MCP
+- [x] **Phase 1: Single-Plugin MVP** - Validate VST3 hosting in Rust and deliver working audio processing via MCP
 - [ ] **Phase 2: Crash Isolation** - Supervisor-worker process split with crash recovery and plugin blocklist
 - [ ] **Phase 3: AI Parameter Intelligence** - Dynamic schema generation and focus mode for context-efficient AI interaction
 - [ ] **Phase 4: System Validation** - End-to-end demo conversation proving conversational audio processing works
@@ -33,8 +33,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md -- VST3 hosting core: project setup, module loading, plugin scanner, lifecycle state machine, COM RAII wrappers, preset I/O
-- [ ] 01-02-PLAN.md -- Audio pipeline and MCP integration: symphonia/hound I/O, block processing, buffer conversion, rmcp server, tool definitions
+- [x] 01-01-PLAN.md -- VST3 hosting core: project setup, module loading, plugin scanner, lifecycle state machine, COM RAII wrappers, preset I/O
+- [x] 01-02-PLAN.md -- Audio pipeline and MCP integration: symphonia/hound I/O, block processing, buffer conversion, rmcp server, tool definitions
 
 ### Phase 2: Crash Isolation
 **Goal**: Plugin crashes are contained in worker processes, keeping the MCP server alive and automatically avoiding known-bad plugins
@@ -88,7 +88,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Single-Plugin MVP | 0/2 | Not started | - |
+| 1. Single-Plugin MVP | 2/2 | ✓ Complete | 2026-02-15 |
 | 2. Crash Isolation | 0/2 | Not started | - |
 | 3. AI Parameter Intelligence | 0/1 | Not started | - |
 | 4. System Validation | 0/1 | Not started | - |
