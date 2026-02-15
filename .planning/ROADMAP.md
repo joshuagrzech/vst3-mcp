@@ -66,8 +66,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 03-01-PLAN.md — IParameterChanges delivery, display strings, and flag filtering
-- [ ] 03-02-PLAN.md — Integration tests for all 5 success criteria
+- [x] 03-01-PLAN.md — IParameterChanges delivery, display strings, and flag filtering
+- [x] 03-02-PLAN.md — Integration tests for all 5 success criteria
 
 ### Phase 4: MCP Server & Tools
 **Goal**: An AI agent (Claude) can connect via MCP and inspect/control the hosted plugin's parameters
@@ -122,7 +122,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 |-------|----------------|--------|-----------|
 | 1. Plugin Hosting | 2/2 | ✓ Complete | 2026-02-15 |
 | 2. Audio Processing | 2/2 | ✓ Complete | 2026-02-15 |
-| 3. Parameter Control | 0/TBD | Not started | - |
+| 3. Parameter Control | 2/2 | ✓ Complete | 2026-02-15 |
 | 4. MCP Server & Tools | 0/TBD | Not started | - |
 | 5. Focus Mode | 0/TBD | Not started | - |
 | 6. State Management | 0/TBD | Not started | - |
