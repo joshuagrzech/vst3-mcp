@@ -1,7 +1,7 @@
 //! Plugin discovery: scan OS-specific paths for .vst3 bundles
 //! and extract metadata (name, vendor, UID, category, version).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing::{debug, warn};
 use vst3::Steinberg::kResultOk;
@@ -74,7 +74,7 @@ pub fn scan_plugins(custom_path: Option<&str>) -> Result<Vec<PluginInfo>, HostEr
 }
 
 /// Recursively walk a directory looking for .vst3 bundles.
-fn scan_directory(dir: &PathBuf, plugins: &mut Vec<PluginInfo>) {
+fn scan_directory(dir: &Path, plugins: &mut Vec<PluginInfo>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -119,7 +119,7 @@ fn scan_directory(dir: &PathBuf, plugins: &mut Vec<PluginInfo>) {
 ///
 /// Fast path: try reading moduleinfo.json first.
 /// Slow path: load the module and query the factory.
-fn scan_bundle(bundle_path: &PathBuf) -> Result<Vec<PluginInfo>, HostError> {
+fn scan_bundle(bundle_path: &Path) -> Result<Vec<PluginInfo>, HostError> {
     // Fast path: try moduleinfo.json
     let moduleinfo_path = bundle_path
         .join("Contents")
@@ -157,8 +157,8 @@ fn scan_bundle(bundle_path: &PathBuf) -> Result<Vec<PluginInfo>, HostError> {
 
 /// Parse moduleinfo.json to extract plugin metadata without loading the binary.
 fn scan_moduleinfo(
-    moduleinfo_path: &PathBuf,
-    bundle_path: &PathBuf,
+    moduleinfo_path: &Path,
+    bundle_path: &Path,
 ) -> Result<Vec<PluginInfo>, HostError> {
     let content = std::fs::read_to_string(moduleinfo_path)
         .map_err(|e| HostError::ScanError(format!("failed to read moduleinfo.json: {}", e)))?;
@@ -229,7 +229,7 @@ fn scan_moduleinfo(
                 uid,
                 category: category_str,
                 version,
-                path: bundle_path.clone(),
+                path: bundle_path.to_path_buf(),
             });
         }
     }
@@ -238,7 +238,7 @@ fn scan_moduleinfo(
 }
 
 /// Load a .vst3 module and query the factory for class info.
-fn scan_bundle_binary(bundle_path: &PathBuf) -> Result<Vec<PluginInfo>, HostError> {
+fn scan_bundle_binary(bundle_path: &Path) -> Result<Vec<PluginInfo>, HostError> {
     let module = VstModule::load(bundle_path)?;
     let factory = module.factory();
 
@@ -303,7 +303,7 @@ fn scan_bundle_binary(bundle_path: &PathBuf) -> Result<Vec<PluginInfo>, HostErro
                     uid,
                     category: category_str,
                     version,
-                    path: bundle_path.clone(),
+                    path: bundle_path.to_path_buf(),
                 });
                 continue;
             }
@@ -334,7 +334,7 @@ fn scan_bundle_binary(bundle_path: &PathBuf) -> Result<Vec<PluginInfo>, HostErro
             uid,
             category,
             version: String::new(),
-            path: bundle_path.clone(),
+            path: bundle_path.to_path_buf(),
         });
     }
 

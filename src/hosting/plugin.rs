@@ -76,7 +76,7 @@ impl PluginInstance {
         let component: ComPtr<IComponent> = unsafe {
             let mut obj: *mut c_void = std::ptr::null_mut();
             let result = factory.createInstance(
-                class_id.as_ptr() as *const i8,
+                class_id.as_ptr(),
                 <IComponent as vst3::Interface>::IID.as_ptr() as *const i8,
                 &mut obj,
             );
@@ -127,7 +127,7 @@ impl PluginInstance {
                     let mut obj: *mut c_void = std::ptr::null_mut();
                     let result = unsafe {
                         factory.createInstance(
-                            ctrl_cid.as_ptr() as *const i8,
+                            ctrl_cid.as_ptr(),
                             <IEditController as vst3::Interface>::IID.as_ptr() as *const i8,
                             &mut obj,
                         )
@@ -156,13 +156,13 @@ impl PluginInstance {
         };
 
         // 5. Set the component handler on the controller
-        if let Some(ref ctrl) = controller {
-            if let Some(hp) = handler.to_com_ptr::<IComponentHandler>() {
-                unsafe {
-                    let result = ctrl.setComponentHandler(hp.as_ptr() as *mut IComponentHandler);
-                    if result != kResultOk {
-                        debug!("setComponentHandler returned {}", result);
-                    }
+        if let Some(ref ctrl) = controller
+            && let Some(hp) = handler.to_com_ptr::<IComponentHandler>()
+        {
+            unsafe {
+                let result = ctrl.setComponentHandler(hp.as_ptr());
+                if result != kResultOk {
+                    debug!("setComponentHandler returned {}", result);
                 }
             }
         }
@@ -617,8 +617,8 @@ impl Drop for PluginInstance {
             // Only terminate if it's a separate object (not the component cast to IEditController)
             // We can check by comparing raw pointers
             let comp_as_ctrl: Option<ComPtr<IEditController>> = self.component.cast();
-            let is_same = comp_as_ctrl.as_ref().map_or(false, |c| {
-                c.as_ptr() as usize == ctrl.as_ptr() as usize
+            let is_same = comp_as_ctrl.as_ref().is_some_and(|c| {
+                std::ptr::eq(c.as_ptr(), ctrl.as_ptr())
             });
 
             if !is_same {
@@ -680,12 +680,6 @@ impl VecStream {
         // Safety: No concurrent access -- VST3 plugins are single-threaded
         unsafe { &(*self.inner.get()).data }
     }
-
-    fn inner_mut(&self) -> &mut VecStreamInner {
-        // Safety: IBStream is used single-threaded from the plugin side.
-        // The UnsafeCell allows us to mutate through &self as required by the trait.
-        unsafe { &mut *self.inner.get() }
-    }
 }
 
 impl vst3::Class for VecStream {
@@ -699,7 +693,8 @@ impl IBStreamTrait for VecStream {
         num_bytes: int32,
         num_bytes_read: *mut int32,
     ) -> vst3::Steinberg::tresult {
-        let inner = self.inner_mut();
+        // Safety: IBStream is used single-threaded from the plugin side.
+        let inner = unsafe { &mut *self.inner.get() };
         let available = inner.data.len().saturating_sub(inner.position);
         let to_read = (num_bytes as usize).min(available);
 
@@ -727,7 +722,8 @@ impl IBStreamTrait for VecStream {
         num_bytes: int32,
         num_bytes_written: *mut int32,
     ) -> vst3::Steinberg::tresult {
-        let inner = self.inner_mut();
+        // Safety: IBStream is used single-threaded from the plugin side.
+        let inner = unsafe { &mut *self.inner.get() };
         let count = num_bytes as usize;
 
         if count > 0 && !buffer.is_null() {
@@ -754,7 +750,8 @@ impl IBStreamTrait for VecStream {
         mode: int32,
         result: *mut vst3::Steinberg::int64,
     ) -> vst3::Steinberg::tresult {
-        let inner = self.inner_mut();
+        // Safety: IBStream is used single-threaded from the plugin side.
+        let inner = unsafe { &mut *self.inner.get() };
 
         let new_pos = match mode as u32 {
             x if x == kIBSeekSet => pos as usize,
@@ -773,7 +770,8 @@ impl IBStreamTrait for VecStream {
     }
 
     unsafe fn tell(&self, pos: *mut vst3::Steinberg::int64) -> vst3::Steinberg::tresult {
-        let inner = self.inner_mut();
+        // Safety: IBStream is used single-threaded from the plugin side.
+        let inner = unsafe { &mut *self.inner.get() };
         if !pos.is_null() {
             unsafe { *pos = inner.position as vst3::Steinberg::int64 };
         }
