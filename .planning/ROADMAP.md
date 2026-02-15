@@ -31,11 +31,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A loaded plugin transitions through Created, SetupDone, Active, and Processing states without errors
   4. Unloading a plugin (teardown) completes without segfaults or resource leaks, verified by repeated load/unload cycles
   5. Both unified and split Component/Controller plugins load and initialize correctly (tested with at least two different plugin brands)
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
+- [ ] 01-01-PLAN.md -- Out-of-process scanner and hardened teardown ordering
+- [ ] 01-02-PLAN.md -- Integration tests with real plugins (lifecycle verification)
 
 ### Phase 2: Audio Processing
 **Goal**: An audio file can be processed through the hosted child plugin with correct output
@@ -120,7 +120,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Plugin Hosting | 0/TBD | Not started | - |
+| 1. Plugin Hosting | 0/2 | Planned | - |
 | 2. Audio Processing | 0/TBD | Not started | - |
 | 3. Parameter Control | 0/TBD | Not started | - |
 | 4. MCP Server & Tools | 0/TBD | Not started | - |
