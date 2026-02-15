@@ -490,6 +490,39 @@ impl PluginInstance {
         }
     }
 
+    /// Get the tail length in samples reported by the plugin.
+    ///
+    /// Returns the number of samples the plugin needs to process after
+    /// input ends (for effects like reverb/delay). Returns u32::MAX
+    /// for infinite tail (generator plugins).
+    pub fn get_tail_samples(&self) -> u32 {
+        unsafe { self.processor.getTailSamples() }
+    }
+
+    /// Re-setup the plugin with a new sample rate.
+    ///
+    /// Performs: stop_processing -> deactivate -> setup(new_rate) -> activate -> start_processing.
+    /// Only valid when in Processing state.
+    pub fn re_setup(&mut self, sample_rate: f64, max_block_size: i32) -> Result<(), HostError> {
+        if self.state != PluginState::Processing {
+            return Err(HostError::InvalidState(format!(
+                "re_setup requires Processing state, current: {:?}",
+                self.state
+            )));
+        }
+
+        self.stop_processing()?;
+        self.deactivate()?;
+
+        // Reset to Created state so setup() will accept it
+        self.state = PluginState::Created;
+        self.setup(sample_rate, max_block_size)?;
+        self.activate()?;
+        self.start_processing()?;
+
+        Ok(())
+    }
+
     /// Get bus information for the plugin.
     pub fn get_bus_info(&self) -> Vec<BusInfo> {
         let mut buses = Vec::new();
