@@ -74,6 +74,10 @@ Recent decisions affecting current work:
 - [04-01]: Five MCP tools expose parameter control (get_plugin_info, list_params, get_param, set_param, batch_set)
 - [04-01]: Integration test uses tools/call method and proper MCP handshake per 2024-11-05 spec
 
+### Roadmap Evolution
+
+- Phase 04.1 inserted after Phase 4: Host plugin editor window (URGENT)
+
 ### Pending Todos
 
 - Scanner should filter discovered classes to only IComponent-compatible entries (discovered during 01-02 integration testing)
