@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Plugin Hosting** - Load and lifecycle-manage a child VST3 plugin
 - [x] **Phase 2: Audio Processing** - Process audio files through the hosted child plugin
-- [ ] **Phase 3: Parameter Control** - Read and write child plugin parameters via IParameterChanges
+- [x] **Phase 3: Parameter Control** - Read and write child plugin parameters via IParameterChanges
 - [ ] **Phase 4: MCP Server & Tools** - Embedded MCP server with AI-accessible parameter tools
 - [ ] **Phase 5: Focus Mode** - Parameter filtering so AI only sees user-selected parameters
 - [ ] **Phase 6: State Management** - Save and load child plugin presets
@@ -80,11 +80,10 @@ Plans:
   4. Calling `get_param` with a parameter id returns its current normalized value and display string
   5. Calling `set_param` with a parameter id and value produces an audible change in the next processed audio output
   6. Calling `batch_set` with multiple parameter id/value pairs applies all changes and the resulting audio reflects all parameter modifications
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 04-01: TBD
-- [ ] 04-02: TBD
+- [ ] 04-01-PLAN.md — Six MCP parameter tools (get_plugin_info, list_params, get_param, set_param, batch_set) plus integration tests
 
 ### Phase 5: Focus Mode
 **Goal**: Only user-selected parameters are exposed to AI, reducing noise from hundreds of irrelevant controls
@@ -123,6 +122,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 1. Plugin Hosting | 2/2 | ✓ Complete | 2026-02-15 |
 | 2. Audio Processing | 2/2 | ✓ Complete | 2026-02-15 |
 | 3. Parameter Control | 2/2 | ✓ Complete | 2026-02-15 |
-| 4. MCP Server & Tools | 0/TBD | Not started | - |
+| 4. MCP Server & Tools | 0/1 | Not started | - |
 | 5. Focus Mode | 0/TBD | Not started | - |
 | 6. State Management | 0/TBD | Not started | - |
