@@ -12,7 +12,7 @@ AgentAudio validates that AI can control VST3 plugin parameters through an offli
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Plugin Hosting** - Load and lifecycle-manage a child VST3 plugin
+- [x] **Phase 1: Plugin Hosting** - Load and lifecycle-manage a child VST3 plugin
 - [ ] **Phase 2: Audio Processing** - Process audio files through the hosted child plugin
 - [ ] **Phase 3: Parameter Control** - Read and write child plugin parameters via IParameterChanges
 - [ ] **Phase 4: MCP Server & Tools** - Embedded MCP server with AI-accessible parameter tools
@@ -34,8 +34,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md -- Out-of-process scanner and hardened teardown ordering
-- [ ] 01-02-PLAN.md -- Integration tests with real plugins (lifecycle verification)
+- [x] 01-01-PLAN.md -- Out-of-process scanner and hardened teardown ordering
+- [x] 01-02-PLAN.md -- Integration tests with real plugins (lifecycle verification)
 
 ### Phase 2: Audio Processing
 **Goal**: An audio file can be processed through the hosted child plugin with correct output
@@ -120,7 +120,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Plugin Hosting | 0/2 | Planned | - |
+| 1. Plugin Hosting | 2/2 | ✓ Complete | 2026-02-15 |
 | 2. Audio Processing | 0/TBD | Not started | - |
 | 3. Parameter Control | 0/TBD | Not started | - |
 | 4. MCP Server & Tools | 0/TBD | Not started | - |
