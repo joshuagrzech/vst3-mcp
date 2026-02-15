@@ -1,269 +1,238 @@
 # Project Research Summary
 
-**Project:** Headless VST3 Host as MCP Server
-**Domain:** Audio Processing / AI-Controlled Plugin Hosting
-**Researched:** 2026-02-14
+**Project:** AgentAudio (VST3 Wrapper Plugin with Embedded MCP Server)
+**Domain:** Real-time audio plugin hosting with AI parameter control
+**Researched:** 2026-02-15
 **Confidence:** MEDIUM-HIGH
 
 ## Executive Summary
 
-This project is a headless VST3 audio plugin host that exposes its functionality through the Model Context Protocol (MCP), enabling AI agents to process audio files through professional audio plugins. Expert implementations (DAWs, headless hosts) reveal that VST3 hosting requires careful COM lifecycle management, multi-process isolation for crash protection, and deep understanding of the VST3 specification's threading and state management requirements. The AI-driven use case introduces a unique challenge: VST3 plugins can expose hundreds of parameters, but AI context windows require intelligent parameter subsetting ("focus mode") to remain effective.
+AgentAudio is a VST3 plugin built with nih-plug that wraps and hosts a child VST3 plugin while exposing AI-controlled parameter manipulation through an embedded MCP server. This is a plugin-hosting-inside-plugin architecture with three asynchronous contexts: a real-time audio thread (nih-plug process callback), a Tokio runtime (MCP server on background thread), and a GUI thread (nih-plug-egui + child IPlugView). The core technical challenge is bridging the real-time audio thread with async AI control without violating real-time safety constraints.
 
-The recommended approach combines Rust's safety guarantees with a multi-layered architecture: a supervisor process handling MCP protocol (using the official rmcp SDK) and worker processes hosting VST3 plugins (using coupler-rs vst3 bindings). Critical early decisions include using pure-Rust audio I/O (symphonia for decode, hound for encode), implementing VST3 Unit-based parameter grouping for focus mode, and establishing a two-phase rollout: single-process MVP for validation, followed by multi-process architecture for production robustness.
+The recommended approach is to build in risk-ordered phases: first prove that nih-plug can host a child VST3 plugin with correct real-time audio passthrough, then add lock-free communication between the audio thread and MCP server, and finally implement the "Focus Mode" parameter filtering UI. The current codebase provides a working offline headless VST3 host with MCP server that can be adapted by replacing the mutex-based architecture with lock-free ring buffers (rtrb) and moving from kOffline to kRealtime process mode.
 
-Key risks center on VST3 ecosystem immaturity in Rust (community reports segfaults with instrument plugins), COM reference counting errors leading to memory leaks or crashes, and the subtle requirement that some plugins need a platform message loop even in headless mode. Mitigation strategies include multi-process isolation (crashes affect only worker, not supervisor), rigorous COM abstraction layers to contain unsafe code, and starting with well-tested open-source plugins (Surge XT) before expanding to commercial plugins.
+The primary risks are: (1) memory allocation or mutex use on the audio thread causing glitches, (2) VST3 threading model violations where IEditController is called from wrong threads, (3) COM pointer lifetime bugs causing crashes on plugin unload, and (4) Tokio runtime interactions blocking the audio thread. All are avoidable through disciplined architecture: audio thread exclusively owns the child plugin, communicates only through rtrb SPSC ring buffers, pre-allocates all buffers, and never touches Tokio APIs.
 
 ## Key Findings
 
 ### Recommended Stack
 
-The technology stack prioritizes pure-Rust implementations where possible, falling back to well-maintained FFI bindings only for VST3 COM interfaces. The ecosystem has matured significantly with Steinberg's October 2025 release of VST3 SDK 3.8.0 under MIT license, removing previous licensing friction. However, this same SDK update introduced breaking changes in the coupler-rs binding generator (issue #20) that need verification before starting implementation.
+The stack centers on nih-plug (Rust's primary VST3/CLAP framework) for the outer wrapper plugin, the vst3 crate (0.3.0) for hosting the inner child plugin via raw COM interfaces, rmcp for the MCP server (requires Tokio), and rtrb for wait-free communication between threads.
 
 **Core technologies:**
-- **vst3 (coupler-rs)**: VST3 COM bindings generated from SDK headers, MIT/Apache-2.0 licensed, version 0.3.0 ships pre-generated bindings eliminating build-time C++ dependencies
-- **rmcp**: Official Rust MCP SDK from modelcontextprotocol org, version 0.15.0 implements MCP protocol 2025-11-25 with #[tool] macros for clean integration
-- **symphonia + hound**: Pure-Rust audio I/O (symphonia for multi-format decoding, hound for WAV encoding) eliminates C dependencies and cross-compilation complexity
-- **rtrb + shared_memory**: Lock-free ring buffers paired with cross-platform shared memory for zero-copy audio transfer between supervisor and worker processes
-- **tokio**: Async runtime required by rmcp, industry standard for Rust async, must use spawn_blocking for CPU-bound audio work to avoid starving async tasks
+- **nih-plug (git)**: VST3 wrapper framework for the outer plugin — only serious Rust plugin framework with active maintenance, handles parameter system and real-time buffer management
+- **vst3 (0.3.0)**: VST3 COM bindings for hosting child plugins — provides IComponent/IAudioProcessor interfaces needed to load and control child plugins
+- **rmcp (0.15.0)**: Official Rust MCP SDK — provides tool macro and transport abstractions for AI integration
+- **Tokio (1.49.0)**: Async runtime for MCP server — runs on dedicated background thread, completely isolated from audio thread
+- **rtrb (0.3.2)**: Wait-free SPSC ring buffer — enables real-time safe communication between MCP thread and audio thread
+- **nih-plug-egui (git)**: Immediate-mode GUI framework — integrates egui 0.31 with nih-plug's parameter system for Focus Mode controls
+- **libloading (0.9.0)**: Dynamic library loading — loads .vst3 bundles at runtime
 
-**Critical dependency note:** The coupler-rs vst3 crate tracks SDK 3.8.0 but has a known issue with forward-declared Wayland C structs breaking binding generation. Check issue status before starting Phase 1.
+**Critical architectural notes:**
+- nih-plug uses a forked vst3-sys internally; the vst3 crate (0.3.0) is a separate binding that can coexist
+- Never use mutexes on the audio thread; rtrb provides wait-free SPSC for MCP-to-audio commands
+- Tokio runtime must run on separate thread from audio processing
+- Child plugin process mode must be kRealtime (not kOffline as in current code)
 
 ### Expected Features
 
-VST3 hosting has well-defined table stakes from the official Steinberg specification, but the AI-driven use case introduces unique differentiators around parameter intelligence and focus mode.
+The feature landscape divides into table stakes (VST3 hosting requirements), differentiators (Focus Mode and MCP integration), and anti-features (plugin chaining, real-time MIDI generation by AI).
 
 **Must have (table stakes):**
-- Plugin scanning, discovery, loading, and lifecycle management (initialize -> setActive -> setProcessing sequence strictly enforced)
-- Audio bus configuration negotiation and offline block-based processing pipeline
-- Full parameter enumeration, value read/write, and sample-accurate change delivery via process() call
-- Plugin state save/restore (binary blobs) with proper controller/processor synchronization
-- Host callback interfaces (IHostApplication, IComponentHandler) for bidirectional plugin communication
-- Audio file I/O (WAV minimum, multi-format via symphonia as bonus)
+- Plugin loading with full VST3 lifecycle state machine (Created -> SetupDone -> Active -> Processing)
+- Audio passthrough with correct buffer format conversion and tail handling
+- Parameter enumeration, read, and write via IParameterChanges
+- State save/load with .vstpreset format
+- Component/Controller separation handling (both unified and split patterns)
+- IComponentHandler callbacks (beginEdit/performEdit/endEdit/restartComponent)
 
-**Should have (competitive differentiators):**
-- **Unit-based parameter grouping (IUnitInfo)**: VST3's built-in mechanism for organizing parameters by functional section (EQ unit, compressor unit, etc.) — THE primary enabler for focus mode
-- **Semantic parameter classification**: Parse parameter names against keyword dictionaries to understand function (frequency/gain/threshold/reverb) enabling intent mapping ("make it brighter" -> high-freq EQ params)
-- **Smart parameter subsetting**: Present only 5-15 relevant parameters to AI per interaction, combining unit hierarchy + flag filtering + semantic matching + importance ranking
-- **Plugin chain management**: Route audio through multiple plugins in series (EQ -> Compressor -> Reverb), essential for real workflows
-- **Preset A/B comparison and parameter-level diffs**: Track AI changes for undo, side-by-side comparison, human-readable audit trails
+**Should have (competitive advantage):**
+- Focus Mode: parameter filtering UI where user marks which params are AI-exposed (solves "200 params overwhelm AI" problem)
+- MCP tools: list_params, get_param, set_param, batch_set filtered by Focus Mode
+- Parameter display strings (AI needs "3.5 dB" not "0.72")
+- Unit hierarchy (IUnitInfo) for grouping params logically
+- Semantic parameter aliases (rename "Param 42" to "reverb_decay_time" for AI readability)
+- MIDI event routing (unlocks instrument plugins: synths, samplers)
 
 **Defer (v2+):**
-- Plugin GUI rendering (headless by design, massive platform complexity)
-- Real-time audio device I/O (offline processing first, real-time as separate milestone)
-- VST2/CLAP/AU support (VST3-only initially)
-- ARA protocol (specialized DAW integration, irrelevant for headless batch processing)
-- MIDI device enumeration (AI generates parameter changes, not MIDI performance)
+- Child plugin GUI embedding (IPlugView) — high complexity, platform-specific X11 work on Linux
+- Real-time audio streaming — requires audio I/O backend (CPAL/JACK), fundamentally changes architecture from offline
+- Plugin chaining — building a DAW, massive scope creep
+- Custom DSP — compete with dedicated plugins, maintenance burden
 
-**Critical insight from FEATURES.md:** Approximately 5% of VST3 plugins require a platform message loop even when no GUI is displayed, otherwise producing silence. Solution: initialize platform event loop without creating windows (documented JUCE pattern). This is a non-negotiable table stake despite being headless.
+**MVP definition:** Offline processing with working parameter write (IParameterChanges implementation), parameter display strings, Focus Mode basic JSON config, and MCP tools. This validates that AI can usefully control a VST3 plugin before investing in real-time or GUI complexity.
 
 ### Architecture Approach
 
-A supervisor-worker architecture with clear separation between MCP protocol handling and crash-prone VST3 plugin hosting. The supervisor process runs the rmcp MCP server, manages plugin registry and scanning, and owns worker process lifecycle. Each worker process hosts a plugin or plugin chain, isolating crashes to avoid killing the MCP connection. Communication uses two channels: Unix domain sockets for control plane (commands, responses, parameter changes) and shared memory with ring buffers for data plane (zero-copy audio transfer).
+The architecture is a three-thread system: (1) audio thread runs nih-plug's process callback and forwards buffers to the child plugin, (2) MCP thread runs a Tokio runtime hosting the rmcp server, (3) GUI thread runs nih-plug-egui for wrapper controls and optionally embeds child IPlugView. Threads communicate exclusively through lock-free data structures: rtrb SPSC ring buffers for command/notification flow, AtomicF32 arrays for parameter value caching.
 
 **Major components:**
-1. **MCP Server (Supervisor)** — Protocol handling, session management, worker lifecycle orchestration, plugin metadata registry with cached scan results
-2. **Worker Process** — Loads VST3 plugins, executes audio processing, isolates crashes from supervisor, communicates via Unix sockets + shared memory
-3. **Plugin Registry** — Scans OS-standard VST3 paths, caches metadata (using moduleinfo.json for fast extraction), provides plugin discovery API
-4. **VST3 Host Abstraction** — Three-layer architecture: raw COM bindings (Layer 1), safe COM wrappers with RAII (Layer 2), public plugin API (Layer 3)
-5. **Audio Pipeline** — Symphonia decode -> deinterleave to planar buffers -> block-based processing -> interleave -> hound encode
+1. **nih-plug Plugin struct** — implements Plugin trait, owns audio thread lifecycle, delegates processing to child plugin host
+2. **Child Plugin Host** — loads/initializes/processes child VST3 via COM (adapts current PluginInstance from codebase to real-time mode)
+3. **MCP Server** — handles AI tool calls for parameter control, runs on dedicated Tokio runtime thread
+4. **Lock-Free Bridge** — rtrb ring buffers transfer commands (MCP->audio) and notifications (audio->MCP) without blocking
+5. **Focus Mode Manager** — tracks which parameters are exposed to AI via atomic bitfield
+6. **GUI (Wrapper)** — nih-plug-egui editor with Focus Mode controls and status display
+7. **GUI (Child Editor)** — optional IPlugView embedding with platform-specific window parenting (deferred to v2)
 
-**Architectural patterns:**
-- Layered VST3 abstraction to contain unsafe COM code in Layer 2 only
-- State machine enforcement for plugin activation sequence (Created -> SetupDone -> Active -> Processing)
-- Block-based processing with pre-allocated buffers (no allocation in audio loop)
-- MCP resource exposure for plugin metadata discovery before tool calls
+**Critical patterns:**
+- Audio thread exclusively owns PluginInstance, never shares via Arc/Mutex
+- Tokio runtime spawned in initialize(), shut down in deactivate()/Drop
+- Pre-allocate all buffers during setup, zero allocation in process()
+- Child plugin tied to wrapper lifecycle (mirror sample rate, buffer size, activation state)
+- Parameter changes delivered via IParameterChanges, not direct controller calls
 
-**Simplification path:** Single-process MVP combines supervisor + worker in one binary using spawn_blocking for audio work. Multi-process architecture added in Phase 2 for production robustness.
+**Highest-risk integration:** IPlugView embedding on Linux requires X11/Wayland window parenting inside egui context. No clear examples found. This is deferred to Phase 4.
 
 ### Critical Pitfalls
 
-Research identified 12 pitfalls across three severity tiers. Top 5 critical/moderate issues:
+The top five pitfalls are all related to real-time safety and threading correctness. The audio thread is unforgiving: any allocation, mutex lock, or blocking call causes audible glitches.
 
-1. **COM Lifecycle Mismanagement** — VST3 plugins use reference-counted COM objects. Missing Release leaks memory, double-Release causes use-after-free. Prevention: build RAII VstPtr wrappers at Layer 2 that call AddRef on clone and Release on drop, never expose raw pointers above Layer 2, test with multiple plugin vendors
-2. **Plugin Thread Affinity Violations** — VST3 spec defines separate threading contexts (UI thread for controller, audio thread for processor, main thread for init). Calling from wrong thread causes crashes/deadlocks in specific plugins. Prevention: respect threading model even in headless mode, use Rust type system to enforce (marker types, !Send traits)
-3. **Plugin Segfaults Killing the Host** — Buggy plugins can crash. In single-process architecture, this kills MCP connection. Prevention: multi-process isolation from Phase 2 onward, supervisor detects worker crash and reports error gracefully to AI agent
-4. **Blocking Tokio Runtime with Audio** — Processing audio on tokio async threads starves async tasks, causes timeouts. Prevention: always use spawn_blocking for CPU-bound work (symphonia decode, plugin processing), or delegate to worker processes
-5. **Incorrect Buffer Layout** — VST3 uses non-interleaved (planar) buffers, many Rust crates use interleaved. Mixing produces garbage audio. Prevention: explicit interleave/deinterleave functions, unit tests with known signals (sine wave round-trip)
+1. **Memory allocation on audio thread** — Heap allocation (Vec::push, String::format, Box::new) causes unbounded latency. Current code allocates Vec per process call (lines 371-374, 388-391 in plugin.rs). Fix by pre-allocating buffers during setup and reusing. Enable assert_process_allocs feature to catch violations.
 
-**Phase-specific warning:** Plugin scanning is slow (plugins load sample libraries, check copy protection during init) and crash-prone. Run scanning in subprocess from day one, cache aggressively using moduleinfo.json for metadata extraction without binary loading.
+2. **Mutex on audio thread (priority inversion)** — Current AudioHost uses Arc<Mutex<Option<PluginInstance>>> which prevents real-time usage. High-priority audio thread blocks waiting for low-priority MCP thread holding mutex. Redesign with lock-free ring buffers (rtrb) before adding real-time path.
+
+3. **VST3 COM pointer lifetime and drop order** — Dropping module before COM pointers or calling terminate() before releasing interfaces causes use-after-free. Must follow strict teardown order: setProcessing(false) -> setActive(false) -> disconnect -> release controller pointers -> controller.terminate() -> release component pointers -> component.terminate() -> drop module. Current Drop impl needs explicit ordering.
+
+4. **Blocking audio thread with Tokio** — Any Tokio API call (block_on, tokio::sync channels) from audio thread is catastrophic. Tokio runtime must run on completely separate thread. Use rtrb (not tokio::sync::mpsc) for audio-thread communication.
+
+5. **VST3 threading model violations** — VST3 spec mandates IEditController calls from UI thread, IAudioProcessor::process from audio thread. MCP server calling controller methods from Tokio workers violates this. Route all controller calls through dedicated controller thread or command queue.
+
+**Secondary pitfalls:** Plugin crashes taking down host (need out-of-process scanning), incorrect IParameterChanges implementation (no automation without it), denormal floating-point performance traps (flush to zero on audio thread start).
 
 ## Implications for Roadmap
 
-Based on research, suggested four-phase structure balancing early validation, production robustness, and AI-specific intelligence features.
+Based on research, the roadmap should be risk-ordered: build the hardest/riskiest integrations first to fail fast. The architecture has three high-risk integrations (nih-plug + child hosting, lock-free bridge + MCP, child GUI embedding) that must be proven independently before combining.
 
-### Phase 1: Single-Plugin MVP (Foundation + Validation)
-**Rationale:** Validates core VST3 hosting without multi-process complexity. Establishes safe COM abstractions and audio pipeline patterns that persist through all phases. Delivers working end-to-end flow for AI testing.
+### Phase 1: Real-Time Audio Passthrough (Prove nih-plug + Child Hosting)
+**Rationale:** This is the highest-risk integration. Proving that nih-plug can host a child VST3 with correct real-time audio passthrough de-risks the entire project. If this fails, the project pivots to a different architecture.
+**Delivers:** Minimal nih-plug plugin that loads a child VST3 and passes audio through it in a DAW with zero glitches
+**Addresses:** Plugin loading, lifecycle state machine, audio passthrough, sample rate negotiation, tail handling, multi-channel support (table stakes from FEATURES.md)
+**Avoids:** Allocation on audio thread (pre-allocate buffers), COM drop order bugs (explicit teardown sequence)
+**Validates:**
+- Buffer format conversion (nih-plug Buffer <-> VST3 AudioBusBuffers) works correctly
+- Lifecycle alignment (initialize/process/deactivate) between wrapper and child
+- kRealtime process mode (current code uses kOffline) produces stable output
+- No audio glitches under continuous processing in Bitwig/REAPER
 
-**Delivers:** Single plugin processing (load plugin -> set parameters -> process audio file -> write output) exposed via MCP tools. Supervisor + worker combined in one binary.
+### Phase 2: Lock-Free Bridge + MCP Integration (Prove MCP + Real-Time Coexistence)
+**Rationale:** The second-highest risk is proving that Tokio runtime and audio thread can coexist without mutual interference. This phase adds the lock-free communication layer and MCP server.
+**Delivers:** MCP server running on background thread, AI tools can read/write parameters, audio thread shows zero blocking
+**Uses:** rtrb (0.3.2) for SPSC ring buffers, rmcp (0.15.0) for MCP server, Tokio (1.49.0) on dedicated thread
+**Implements:** Lock-Free Bridge component (command/notification queues), MCP Server component (tool handlers)
+**Addresses:** MCP tool: get_param, set_param, get_plugin_info (differentiators from FEATURES.md)
+**Avoids:** Mutex on audio thread (use rtrb), blocking audio thread with Tokio (separate runtime thread), VST3 threading violations (controller thread separation)
+**Validates:**
+- Tokio runtime spawns/shuts down cleanly within plugin lifecycle
+- Parameter changes from MCP reach child plugin and produce audible results
+- Audio thread latency stays under 1ms during concurrent MCP requests
+- stdio transport works inside DAW process (or pivot to SSE if it doesn't)
 
-**Addresses features:**
-- Plugin scanning with moduleinfo.json caching
-- Plugin loading and lifecycle management (full state machine)
-- Offline block-based processing
-- Parameter enumeration and basic value manipulation
-- State save/restore (binary blobs)
-- Hidden message loop initialization (prevents silence bug)
-- Audio I/O (symphonia decode, hound WAV encode)
+### Phase 3: IParameterChanges Implementation + Parameter Display
+**Rationale:** The current codebase passes null for inputParameterChanges, which prevents proper parameter automation. This phase implements the missing COM interfaces and adds human-readable parameter values.
+**Delivers:** Sample-accurate parameter automation, parameter display strings ("3.5 dB"), parameter flag filtering
+**Implements:** IParameterChanges and IParamValueQueue COM objects (host-side), parameter value display via getParamStringByValue
+**Addresses:** Parameter write via IParameterChanges (table stakes), parameter display strings (differentiator)
+**Avoids:** Incorrect IParameterChanges (zipper noise, ignored params), allocation in process (pre-allocated change queues)
+**Validates:**
+- Parameter sweeps produce smooth, zipper-free output
+- Plugins respond correctly to automated parameters
+- Read-only params (kIsReadOnly flag) are filtered out
 
-**Avoids pitfalls:**
-- COM lifecycle errors via Layer 2 RAII wrappers
-- Tokio blocking via spawn_blocking for all audio work
-- Buffer layout bugs via explicit interleave/deinterleave with tests
-- Thread affinity violations via state machine enforcement
+### Phase 4: Focus Mode + ComponentHandler Integration
+**Rationale:** Focus Mode is the core differentiator. This phase adds the parameter exposure tracking and MCP filtering.
+**Delivers:** "Wiggle to expose" parameter selection, MCP tools filtered to exposed params only
+**Implements:** Focus Mode Manager (atomic bitfield tracking), ComponentHandler intercepts (performEdit captures user tweaks)
+**Addresses:** Focus Mode parameter filtering, Focus Mode persistence (differentiators from FEATURES.md)
+**Avoids:** Threading violations (ComponentHandler callbacks may come from plugin on any thread, handle with atomics)
+**Validates:**
+- User can mark/unmark parameters via GUI interaction
+- MCP list_params returns only exposed parameters
+- Focus Mode config persists across plugin reload
 
-**Technology focus:** vst3 (coupler-rs) bindings, rmcp MCP server, symphonia/hound audio I/O, tokio spawn_blocking
+### Phase 5: Wrapper GUI + Polish
+**Rationale:** GUI is lower priority than core functionality. Basic wrapper controls (Focus Mode toggles, parameter list) can be terminal-based initially.
+**Delivers:** nih-plug-egui wrapper UI, parameter overview, Focus Mode controls
+**Implements:** GUI (Wrapper) component with egui widgets
+**Addresses:** Wrapper UI (differentiator)
+**Validates:**
+- GUI displays child plugin parameters with current values
+- Focus Mode listen/clear buttons work
+- GUI reads atomic param cache without blocking audio thread
 
-**Research confidence:** HIGH — single plugin hosting has clear patterns from Steinberg docs and existing implementations (Plugalyzer, JUCE examples)
-
-### Phase 2: Multi-Process Architecture + Plugin Chains
-**Rationale:** Production robustness requires crash isolation. Plugin chains unlock real workflows (EQ -> Compressor -> Reverb). Both features naturally share the supervisor-worker split architecture.
-
-**Delivers:** Supervisor-worker separation via Unix sockets + shared memory. Worker crash recovery. Multi-plugin chains with latency compensation and buffer routing.
-
-**Addresses features:**
-- Plugin crash protection (worker dies, supervisor survives)
-- Plugin chain management (series routing)
-- Tail handling for reverbs/delays
-- Latency reporting and compensation across chain
-- Graceful timeout detection for hung plugins
-
-**Implements architecture:**
-- Worker process binary (separate from supervisor)
-- Unix domain sockets for control channel
-- Shared memory + rtrb ring buffers for audio data
-- Worker protocol (WorkerCommand/WorkerResponse types)
-
-**Avoids pitfalls:**
-- Plugin segfaults killing host (isolation contains crashes)
-- Shared memory cleanup on crash (supervisor owns lifecycle)
-- MCP timeout on long renders (async worker communication)
-
-**Technology focus:** rtrb, shared_memory, tokio::process, nix (POSIX signals), workspace crate organization (protocol crate shared between binaries)
-
-**Research confidence:** MEDIUM — multi-process VST3 hosting less documented than single-process, but IPC patterns are well-established
-
-### Phase 3: AI-Specific Intelligence (Focus Mode + Presets)
-**Rationale:** Parameter intelligence is the core product differentiator. Defer until hosting foundation is solid to avoid building on unstable base.
-
-**Delivers:** Unit-based parameter grouping, semantic classification, smart parameter subsetting (focus mode), preset A/B comparison, parameter-level diffs.
-
-**Addresses features:**
-- IUnitInfo parsing for structural parameter grouping
-- Semantic name analysis (freq/threshold/reverb keyword dictionaries)
-- Parameter importance ranking
-- Focus mode: present 5-15 relevant params to AI per interaction
-- .vstpreset read/write for DAW interoperability
-- Preset A/B toggle and parameter-level diff reports
-
-**Avoids pitfalls:**
-- State round-trip verification (REAPER-documented persistence bugs)
-- Parameter change delivery via process() (only valid route to processor)
-
-**Technology focus:** VST3 IUnitInfo interface, preset format parsing, semantic analysis heuristics
-
-**Research confidence:** MEDIUM-HIGH — IUnitInfo is well-documented in VST3 spec, but semantic classification is custom heuristic work
-
-### Phase 4: Analysis + Polish
-**Rationale:** Audio analysis provides feedback loop for AI ("did the change work?"). Batch rendering and quality-of-life features complete production readiness.
-
-**Delivers:** Pre/post audio analysis (LUFS, peak, spectral centroid), batch rendering, progress reporting, plugin compatibility tracking.
-
-**Addresses features:**
-- Quantify effect of AI changes (loudness, spectrum shifts)
-- Process multiple files with same chain/settings
-- Elevated sample rate processing (88.2k/96k offline quality)
-- Track which plugins work well headless
-
-**Technology focus:** Audio analysis algorithms (potentially ebur128 crate for LUFS), batch orchestration
-
-**Research confidence:** HIGH — audio analysis is well-documented domain, batch processing is straightforward orchestration
+### Phase 6: Child Plugin GUI Embedding (DEFERRED)
+**Rationale:** This is high-risk, platform-specific, and not required for AI control. Defer until core functionality is proven.
+**Delivers:** Child plugin's native GUI embedded alongside wrapper controls
+**Implements:** GUI (Child Editor) component with platform-specific window parenting
+**Risk:** X11/Wayland window management inside egui context has no clear examples. May be infeasible without significant research.
 
 ### Phase Ordering Rationale
 
-**Dependency chain:**
-- Phase 1 establishes VST3 COM abstractions and audio pipeline that Phases 2-4 build on
-- Phase 2 requires Phase 1's working plugin hosting to test crash isolation
-- Phase 3 requires Phase 1's parameter system and Phase 2's robust hosting
-- Phase 4 requires all previous phases' working audio processing
-
-**Risk mitigation:**
-- Phase 1 validates VST3 ecosystem compatibility before heavy multi-process investment
-- Phase 2 adds production robustness before exposing to users
-- Phase 3 defers AI-specific complexity until core hosting proven stable
-- Phase 4 polishes already-working system
-
-**Early validation:**
-- Phase 1 delivers working end-to-end MCP integration for AI agent testing
-- Single-process simplicity accelerates learning and iteration
-- Focus mode can be prototyped in Phase 1 with simple heuristics, formalized in Phase 3
+- **Risk-ordered, not feature-ordered:** Phase 1 proves the hardest technical problem (plugin-in-plugin with real-time audio). If this fails, we know early.
+- **Dependency-driven:** Lock-free bridge (Phase 2) depends on working audio pipeline (Phase 1). Focus Mode (Phase 4) depends on parameter automation (Phase 3).
+- **Incremental validation:** Each phase adds one high-risk integration. No phase combines multiple unknowns.
+- **Defer GUI complexity:** Child GUI embedding (Phase 6) is deferred because AI control doesn't require visual feedback. Terminal-based parameter display is sufficient for MVP.
+- **Pitfall avoidance:** Phase 1 establishes allocation-free patterns before adding MCP (Phase 2). Phase 2 establishes lock-free communication before adding Focus Mode threading (Phase 4).
 
 ### Research Flags
 
-**Needs deeper research during planning:**
-- **Phase 1:** VST3 SDK 3.8.0 compatibility with coupler-rs (issue #20 status check), platform-specific message loop initialization patterns for headless operation
-- **Phase 2:** Shared memory + ring buffer synchronization patterns (shmem-ipc vs shared_memory tradeoffs), worker crash detection and graceful recovery flows
-- **Phase 3:** IUnitInfo adoption rate across plugin ecosystem (fallback strategies if rarely implemented), semantic classification accuracy validation
+Phases likely needing deeper research during planning:
+- **Phase 1:** nih-plug Buffer <-> VST3 AudioBusBuffers format conversion — research buffer layouts, channel ordering, sample format (f32 vs f64)
+- **Phase 2:** stdio transport inside DAW plugin — verify stdin/stdout are accessible, or research SSE/WebSocket transport
+- **Phase 6:** IPlugView X11 embedding in egui — platform-specific window parenting, resize coordination, IPlugFrame callbacks (LOW confidence, no examples found)
 
-**Standard patterns (skip research-phase):**
-- **Phase 4:** Audio analysis algorithms well-documented, batch processing is straightforward orchestration
+Phases with standard patterns (skip research-phase):
+- **Phase 3:** IParameterChanges is well-documented in VST3 SDK, straightforward COM implementation
+- **Phase 4:** Atomic bitfield and ComponentHandler interception are standard patterns
+- **Phase 5:** egui basics are well-documented, nih-plug-egui provides integration
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | MEDIUM-HIGH | rmcp and audio I/O crates verified and stable. vst3 (coupler-rs) exists at v0.3.0 but has SDK 3.8.0 compat issue needing verification. VST3 hosting in Rust is early ecosystem — community reports segfaults with instruments. |
-| Features | HIGH | VST3 specification is comprehensive and official. Table stakes features well-documented. AI-specific features (focus mode) are novel but built on standard VST3 primitives (IUnitInfo). |
-| Architecture | MEDIUM-HIGH | Supervisor-worker pattern is proven (Bitwig, Sushi examples). Layered COM abstraction matches successful Rust FFI patterns. IPC primitives well-established, but VST3-specific threading details require careful attention. |
-| Pitfalls | HIGH | Multiple independent sources (KVR forums, JUCE community, Steinberg docs) confirm the same critical issues. COM lifecycle, thread affinity, and headless message loop are consistently documented pain points. |
+| Stack | HIGH | nih-plug, rmcp, rtrb, Tokio are all actively maintained with clear docs. vst3 crate (0.3) is proven in current codebase. |
+| Features | HIGH | VST3 spec is authoritative. Feature research cross-referenced spec with real-world hosting implementations (cutoff-vst, JUCE wrappers). |
+| Architecture | MEDIUM | Core patterns (lock-free queues, Tokio on background thread) are well-established. Plugin-in-plugin is novel but feasible. Child GUI embedding on Linux is LOW confidence (no examples). |
+| Pitfalls | HIGH | Real-time audio constraints are well-documented. Pitfalls verified against current codebase (e.g., allocation in process(), mutex on PluginInstance). |
 
 **Overall confidence:** MEDIUM-HIGH
 
+The core real-time audio + MCP integration is feasible with known patterns. The primary uncertainty is child GUI embedding (Phase 6), which is deferred. The architecture is sound if lock-free communication discipline is maintained.
+
 ### Gaps to Address
 
-**VST3 ecosystem maturity in Rust:**
-- Gap: Limited production usage reports for Rust VST3 hosts. KVR forum mentions segfaults with instrument plugins, but unclear scope.
-- Mitigation: Start with well-behaved open-source plugins (Surge XT, Dexed) for development. Build plugin compatibility tracker in Phase 4. Multi-process isolation limits blast radius.
+**Child GUI embedding on Linux:** No examples found of embedding IPlugView inside egui context. The standard approach is separate native window positioned adjacent to egui window. This needs prototype validation in Phase 6. Fallback: skip child GUI entirely, provide parameter list in wrapper UI only.
 
-**coupler-rs SDK 3.8.0 compatibility:**
-- Gap: Issue #20 documents binding generation failure with new SDK's Wayland structs. Unknown resolution status.
-- Mitigation: Check issue status before Phase 1 start. If unresolved, consider pinning to SDK 3.7.x or patching bindings locally. This is a blocking issue for Phase 1.
+**stdio transport in DAW plugin:** DAWs may redirect or close stdin/stdout. If stdio doesn't work, pivot to SSE (HTTP Server-Sent Events) transport. Research SSE setup during Phase 2 as contingency.
 
-**IUnitInfo adoption rate:**
-- Gap: Research unclear on what percentage of plugins implement IUnitInfo for parameter grouping.
-- Mitigation: Phase 3 includes fallback strategies (semantic name analysis, flag filtering). Test with diverse plugin set (Waves, FabFilter, Native Instruments, etc.) during Phase 1 to gather adoption data.
+**vst3 crate vs nih-plug's vst3-sys fork:** These are separate type hierarchies. As long as COM objects are never passed between them (they're not — wrapper uses nih-plug types, child uses vst3 crate types), there's no conflict. Validate during Phase 1.
 
-**Hidden message loop patterns:**
-- Gap: JUCE forum confirms ~5% of plugins need message loop even headless, but platform-specific implementation details unclear.
-- Mitigation: Research platform event loop initialization during Phase 1 planning. JUCE source code provides reference implementation. May require platform-specific code (Cocoa runloop on macOS, Win32 message pump on Windows, X11/Wayland on Linux).
-
-**Long-running MCP operations:**
-- Gap: Unclear if rmcp supports progress notifications or task lifecycle patterns for renders exceeding typical MCP timeout.
-- Mitigation: Check rmcp SEP-1686 task lifecycle implementation during Phase 1. If unsupported, implement two-phase pattern (start_render returns job ID, check_render polls).
+**IComponentHandler thread affinity:** VST3 spec is ambiguous about which thread plugins call restartComponent from. Current assumption is plugins may call from audio thread (spec violation but real-world behavior). Use atomic flags for restartComponent handling. Validate with multiple plugin brands during Phase 3.
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- [VST 3 Developer Portal](https://steinbergmedia.github.io/vst3_dev_portal/) — Official specification, architecture, threading model, parameter system, state management
-- [VST 3 API Documentation](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/) — Interface reference for IComponent, IEditController, IAudioProcessor, IUnitInfo
-- [Steinberg VST 3.8.0 MIT announcement](https://www.steinberg.net/press/2025/vst-3-8/) — Licensing change confirmation
-- [coupler-rs/vst3-rs GitHub](https://github.com/coupler-rs/vst3-rs) — Confirmed v0.3.0, MIT/Apache-2.0, binding architecture
-- [modelcontextprotocol/rust-sdk (rmcp)](https://github.com/modelcontextprotocol/rust-sdk) — Official MCP SDK v0.15.0, protocol 2025-11-25
+- [nih-plug GitHub repository](https://github.com/robbert-vdh/nih-plug) — plugin framework docs, examples, CHANGELOG confirming egui 0.31
+- [VST3 Developer Portal](https://steinbergmedia.github.io/vst3_dev_portal/) — official spec for hosting, parameters, lifecycle
+- [IEditController API Reference](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IEditController.html) — parameter interface contracts
+- [IParameterChanges API Reference](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IParameterChanges.html) — automation delivery pattern
+- [rtrb GitHub](https://github.com/mgeier/rtrb) — wait-free SPSC ring buffer design
+- [rmcp GitHub](https://github.com/modelcontextprotocol/rust-sdk) — official Rust MCP SDK
+- [Using locks in real-time audio processing, safely](https://timur.audio/using-locks-in-real-time-audio-processing-safely) — authoritative article on RT constraints
 
 ### Secondary (MEDIUM confidence)
-- [Bitwig Plugin Crash Protection](https://www.bitwig.com/learnings/plug-in-hosting-crash-protection-in-bitwig-studio-20/) — Multi-process architecture patterns
-- [Sushi - Elk Audio Headless DAW](https://github.com/elk-audio/sushi) — Production headless VST3 hosting reference
-- [Plugalyzer CLI Host](https://github.com/CrushedPixel/Plugalyzer) — Headless VST3 processing validation
-- [Renaud Denis: Robust VST3 Host in Rust](https://renauddenis.com/case-studies/rust-vst) — cutoff-vst architecture (COM abstraction layers)
-- [Symphonia](https://github.com/pdeljanov/Symphonia) — Pure-Rust audio decoding, 2.3M+ downloads
-- [hound](https://github.com/ruuda/hound) — WAV encoding, 7.5M+ downloads
-- [rtrb](https://github.com/mgeier/rtrb) — Real-time lock-free ring buffers for audio
+- [cutoff-vst case study](https://renauddenis.com/case-studies/rust-vst) — real-world VST3 hosting in Rust
+- [nih-plug background tasks issue #172](https://github.com/robbert-vdh/nih-plug/issues/172) — background thread patterns in plugins
+- [Streamable HTTP MCP in Rust](https://www.shuttle.dev/blog/2025/10/29/stream-http-mcp) — axum + rmcp pattern
+- [Tokio: Bridging with sync code](https://tokio.rs/tokio/topics/bridging) — Runtime::new() on std::thread pattern
+- [VST3 + Linux + X11 crash (Dplug issue #434)](https://github.com/AuburnSounds/Dplug/issues/434) — real-world GUI embedding bug
+- [JUCE forum: VST3 threading issues](https://forum.juce.com/t/vst3-crashing-due-to-ieditcontroller-thread-issues/31168) — threading violations in practice
 
-### Tertiary (LOW-MEDIUM confidence)
-- [KVR Forum: CLI VST3 host in Rust](https://www.kvraudio.com/forum/viewtopic.php?t=622780) — Community experience, segfault reports with instruments
-- [JUCE Forum: Headless VST3 silence issue](https://forum.juce.com/t/headless-vst3-host-some-plugins-render-silence/58169) — Message loop requirement validation
-- [JUCE Forum: Parameter updates](https://forum.juce.com/t/vst3-parameter-updates-automation-vs-host-refresh/67373) — Parameter delivery patterns
-- [Steinberg Forums: Scan crashes](https://forums.steinberg.net/t/vst3-host-plugin-crash-while-scanning-bundleentry-bundleexit/776824) — Scan crash protection necessity
+### Tertiary (LOW confidence)
+- [rack crate](https://github.com/sinkingsugar/rack) — VST3 Linux support listed as untested
+- [Carla MCP Server](https://mcp.aibase.com/server/1538249238906150913) — competitor, third-party listing
+- Community forum discussions on IPlugView X11 embedding (KVR Audio) — anecdotal, low signal
 
 ---
-*Research completed: 2026-02-14*
+*Research completed: 2026-02-15*
 *Ready for roadmap: yes*

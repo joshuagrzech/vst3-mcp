@@ -1,366 +1,254 @@
-# Feature Landscape
+# Feature Research: VST3 Wrapper Plugin with AI Parameter Control
 
-**Domain:** Headless VST3 Host / AI-Controlled Audio Processing via MCP
-**Researched:** 2026-02-14
-**Overall confidence:** HIGH (primary sources: Steinberg VST3 Developer Portal, SDK interface docs, real-world host implementations)
+**Domain:** VST3 plugin hosting / AI-controlled audio processing
+**Researched:** 2026-02-15
+**Confidence:** HIGH (VST3 spec well-documented, existing codebase provides grounding)
 
----
+## Feature Landscape
 
-## Table Stakes
+### Table Stakes (Users Expect These)
 
-Features ANY VST3 host must provide. Missing = non-functional or non-compliant.
+Features that a VST3 host/wrapper must have or it is not a functional product.
 
-### Plugin Lifecycle Management
-
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| Plugin scanning and discovery | Must find .vst3 bundles in OS-standard locations | Medium | Scan system paths, load module, query IPluginFactory for class info. Cache results -- rescanning is expensive because plugins load sample libraries or check copy protection during init. Modern plugins include `moduleinfo.json` in the bundle for fast metadata extraction without loading the binary. |
-| Plugin loading and instantiation | Core host duty: create IComponent + IEditController from factory | High | COM-style interface initialization. Must call `initialize()` with IHostApplication context immediately after creation. Component and controller may be combined (single component via queryInterface) or separate -- host must detect and handle both. |
-| Component-controller connection | Processor-controller communication required by spec | Low | Establish bidirectional IConnectionPoint links between processor and controller. Required for state sync and message passing between the two halves. |
-| Plugin deactivation and teardown | Clean resource release, strict ordering mandated by spec | Low | `setProcessing(false)` -> `setActive(false)` -> `terminate()` -> release. Violating this order causes crashes in many plugins. |
-
-### Audio Processing Pipeline
+#### Plugin Lifecycle
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| Audio bus configuration | Plugins declare input/output bus layouts; host must negotiate | Medium | Call `getBusArrangement` / `setBusArrangements` to negotiate channel configs (mono, stereo, surround). Must provide buffer pointers for ALL buses including inactive ones (data pointer can be null, but the bus entry must exist). |
-| ProcessSetup configuration | Tell plugin about sample rate, block size, processing mode | Low | Must call before `setActive(true)`. Set `processMode = kOffline` for our use case. |
-| Offline processing mode flag | Signal non-realtime operation to plugin | Low | Call `setIoMode(kOfflineProcessing)` on IComponent. Plugins may use higher-quality algorithms (oversampling, longer convolutions) when they know processing is offline. |
-| Block-based audio processing | Feed audio buffers through plugin via process() | High | Call `process()` with ProcessData containing audio buffers and parameter changes. Must handle variable block sizes, proper buffer allocation, and 32-bit float sample format. |
-| Silence flag handling | Performance optimization required by well-behaved hosts | Low | Set `kSilent` flag on input buffers containing silence. Check output silence flags to skip downstream processing. Plugins optimize when they know input is silent. |
-| Tail handling | Reverbs/delays produce output after input ends | Medium | Query `getTailSamples()` after processing. Continue calling `process()` with silent input until tail completes. `kInfiniteTail` means plugin is a generator -- keep processing indefinitely (relevant for instrument plugins). |
-| Latency reporting | Plugins introduce processing delay that must be compensated | Medium | Query `getLatencySamples()`. For offline processing, pre-roll input or offset output alignment. Listen for `restartComponent(kLatencyChanged)` callbacks -- plugin latency can change during operation. |
-| Audio file input/output | Must accept and produce audio files | Low | Read/write WAV, FLAC, etc. Use symphonia (decode) and hound (encode) in Rust. Convert between file sample format and 32-bit float processing format. |
+| Load child VST3 from .vst3 bundle | Cannot function without it | MEDIUM | Already implemented. Module loading via `libloading`, factory scanning, COM instantiation. Must handle both bundled and flat layouts. |
+| Plugin scanning (discover installed plugins) | User needs to find what is available | LOW | Already implemented via `scanner.rs`. Scans OS-standard paths. |
+| Full lifecycle state machine (Created -> SetupDone -> Active -> Processing) | VST3 spec mandates this sequence; skipping causes crashes | HIGH | Already implemented. Drop guard ensures correct teardown order. This is the hardest table-stakes feature to get right. |
+| Component + Controller separation | Many plugins use separate IComponent and IEditController; host must handle both patterns (unified and split) | MEDIUM | Already implemented. Tries cast first, then factory creation with separate controller class ID. |
+| IConnectionPoint wiring (component <-> controller) | Required for plugins that use message-based communication between processor and controller | LOW | Already implemented. Connects bidirectionally if both sides support IConnectionPoint. |
+| IComponentHandler callbacks (beginEdit/performEdit/endEdit/restartComponent) | Plugins call these during operation; host must accept them or plugin misbehaves | MEDIUM | Partially implemented -- currently logs but does not act on restartComponent flags. Must handle kLatencyChanged, kParamValuesChanged, kParamTitlesChanged, kIoChanged. |
 
-### Parameter System
+#### Audio Processing
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| Parameter enumeration | Must discover all plugin parameters and their metadata | Low | `getParameterCount()` + `getParameterInfo(index)` on IEditController. Returns ParameterInfo: ID, title, shortTitle, units string, stepCount, defaultNormalizedValue, flags, unitId. |
-| Parameter value read/write | Core interaction for controlling plugins | Medium | All values normalized to `[0.0, 1.0]` as 64-bit doubles. Use `setParamNormalized()` / `getParamNormalized()`. Discrete params: `stepCount` of N means N+1 possible states. Normalization: `discrete_value / stepCount`. |
-| Parameter change delivery via process() | The ONLY way to change plugin processor state | High | Parameters reach the processor ONLY through `IParameterChanges` in the `process()` call. Host must create `IParamValueQueue` objects per changed parameter, with sample-accurate offsets within the audio block. This is non-negotiable -- calling setParamNormalized on the controller is not enough. |
-| Parameter display conversion | Show human-readable values to user/AI | Low | `getParamStringByValue(id, value)` returns display text (e.g., "-6.0 dB", "1/4 note"). `getParamValueByString(id, string)` does reverse lookup. Essential for AI to speak in musical terms, not raw 0-1 floats. |
-| Parameter flags interpretation | Know what each parameter can do | Low | `kCanAutomate` = host can automate it. `kIsBypass` = the plugin's bypass control. `kIsReadOnly` = informational only, don't modify. `kIsHidden` = plugin wants it hidden from users. `kIsList` = present as dropdown. |
+| Audio passthrough (route audio through child plugin) | Core purpose of a wrapper | MEDIUM | Already implemented for offline processing. Handles planar buffers, block-based processing, silence flags. |
+| Sample rate negotiation | Plugin may not support arbitrary rates; host must query and adapt | LOW | Already implemented. Re-setup on sample rate mismatch with input file. |
+| Block size management | Plugins have maximum block size constraints | LOW | Already implemented with 4096 default. |
+| Tail handling (reverb/delay fade-out) | Effects produce output after input ends; cutting it off clips the effect | MEDIUM | Already implemented. Queries getTailSamples(), handles kInfiniteTail with configurable max. |
+| Multi-channel support (stereo at minimum) | Mono-only wrapper is unusable for most plugins | MEDIUM | Already implemented. Bus info enumeration, default bus activation. |
+| Offline rendering | Process audio files through plugin without real-time constraint | LOW | Already implemented as the primary processing mode (kOffline). |
 
-### State and Preset Management
-
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| State save/restore (processor) | Persist and recall plugin configuration | Medium | `IComponent::getState(stream)` serializes processor state to binary blob. `setState(stream)` restores. This is the canonical, complete plugin state including internal data not exposed as parameters. |
-| State sync to controller | Keep controller in sync after state load | Medium | After loading processor state, MUST call `IEditController::setComponentState(stream)` with the SAME processor state stream. Then rescan parameter values. Failure to do this causes controller/processor desync -- a common host bug. |
-| Preset save/load (.vstpreset) | Standard preset interchange format for DAW interop | Medium | Binary format: 48-byte header ("VST3" 4B, version 4B, classID 32B ASCII, chunkListOffset 8B), data chunks ("Comp" for processor, "Cont" for controller), chunk list ("List" 4B, count 4B, entries with chunkID/offset/size). SDK provides `PresetFile` helper class. |
-| Preset location awareness | Find factory and user presets on disk | Low | OS-defined standard paths. Host scans these directories to enumerate available presets per plugin. |
-
-### Host Callback Interfaces
+#### Parameter Management
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| IHostApplication | Plugins query host identity during init | Low | Provide host name and version. Passed as context during `initialize()`. Must also support `createInstance()` for host-provided objects. |
-| IComponentHandler | Plugin-to-host parameter communication channel | Medium | Must implement `beginEdit(id)`, `performEdit(id, value)`, `endEdit(id)`, `restartComponent(flags)`. Plugins call these when their internal state changes, e.g., from program change or inter-parameter dependencies. |
-| Parameter flush (no audio mode) | Plugins need param updates when audio engine is idle | Medium | When not actively processing but plugin is activated, host must periodically call `process()` with null audio buffers to deliver pending parameter changes. Without this, parameter changes made via controller are never seen by processor. |
+| Enumerate all parameters | Must know what the plugin exposes before controlling it | LOW | Already implemented via getParameterCount/getParameterInfo. Captures id, title, units, default, step count, flags. |
+| Read parameter values (normalized) | Must query current state of any parameter | LOW | Already implemented via getParamNormalized. |
+| Write parameter values | Core requirement for any automation or AI control | MEDIUM | Partially implemented. Queue exists but IParameterChanges delivery to process() is TODO. For non-real-time, setParamNormalized on controller works but does not sync to processor correctly without IParameterChanges. |
+| Parameter value display (normalized -> display string) | Users need readable values ("3.5 dB") not raw floats ("0.72") | LOW | Not yet implemented. IEditController::getParamStringByValue provides this. Straightforward to add. |
+| Parameter flags interpretation (kCanAutomate, kIsReadOnly, kIsBypass, kIsHidden) | Must respect read-only params, identify bypass, hide internal params | LOW | Flags captured but not yet interpreted. Critical for Focus Mode -- AI should not try to write read-only params. |
 
-### Plugin Metadata
+#### State Management
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| Plugin category reading | Know if plugin is effect vs instrument, and what subcategory | Low | Read `subCategories` from class info. Pipe-separated: "Fx\|EQ", "Fx\|Reverb", "Instrument\|Sampler". Full list includes ~40 categories: kFxDelay, kFxDynamics, kFxEQ, kFxFilter, kFxModulation, kFxPitchShift, kFxReverb, kFxSpatial, kFxVocals, kInstrumentDrum, kInstrumentPiano, kInstrumentSampler, kInstrumentSynth, etc. |
-| Plugin info extraction | Name, vendor, version, SDK version | Low | Available from IPluginFactory class info. Can be read without full instantiation (for scanning/caching). |
-| MCP tool interface | AI agents interact via MCP protocol | Medium | Expose all plugin operations as MCP tools with typed schemas. This is the primary interface for AI interaction. |
+| Save/load plugin state (.vstpreset format) | Users need to persist and recall settings | HIGH | Already implemented. Handles component state + controller state, class ID validation, setComponentState sync. |
+| Preset compatibility with DAWs | .vstpreset files should work across hosts | MEDIUM | Already implemented using Steinberg binary format with correct chunk structure. |
 
----
+### Differentiators (Competitive Advantage)
 
-## Differentiators
+Features that make AI control practical and powerful. Not required for a basic wrapper, but are the entire reason AgentAudio exists.
 
-Features that set this product apart. Not required for VST3 compliance, but critical for the AI-driven use case.
-
-### Parameter Intelligence (Core Product Value)
+#### Focus Mode (Parameter Filtering for AI)
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Unit-based parameter grouping (IUnitInfo) | Organize parameters by functional section for focused AI context | Medium | Plugins optionally implement IUnitInfo. Units form a tree: root(id=0) -> children. Each unit has ID, name, parentID. Parameters belong to units via `unitId` field in ParameterInfo. This is THE primary mechanism for "focus mode" -- present only parameters from a relevant unit (e.g., show only EQ params when user says "brighter"). |
-| Semantic parameter classification | Understand what parameters DO based on name/context | High | Parse parameter names against keyword dictionaries. "freq/frequency/hz" -> tone. "threshold/ratio/attack/release" -> dynamics. "reverb/delay/room/decay" -> spatial. "gain/volume/level/drive" -> level. Enables mapping user intent to parameter subsets. |
-| Smart parameter subsetting (Focus Mode) | Expose only relevant parameters to AI per interaction | High | Given user intent, select 5-15 relevant parameters from potentially hundreds. Combine: (1) unit hierarchy if available, (2) flag filtering (exclude kIsReadOnly, kIsHidden), (3) semantic name matching, (4) importance ranking. This IS the product's core differentiator. |
-| Parameter value snapshotting and diffing | Track AI changes for undo, A/B, audit trails | Low | Capture parameter ID->value maps before and after AI modifications. Enable "undo last change", side-by-side comparison, and human-readable diff reports ("EQ Band 3 Gain: +2.0 dB -> +5.5 dB"). |
-| IComponentHandler2 grouped edits | Coordinate multi-parameter AI changes atomically | Low | Since VST 3.1. Enables grouped begin/end edit for multiple parameters at once. When AI adjusts 5 parameters simultaneously (e.g., "add warmth"), group them so plugin handles the change atomically. |
+| Parameter exposure selection (Focus Mode) | Plugins expose 50-200+ parameters. AI needs a curated subset to be useful, not overwhelmed. User marks which params matter. | MEDIUM | Core differentiator. Needs a persistent mapping: plugin class ID -> set of exposed param IDs. No VST3 API for this -- it is a wrapper-layer concept. |
+| Parameter grouping by unit hierarchy (IUnitInfo) | Present params in logical groups ("EQ Band 1", "Compressor") rather than flat list. Makes Focus Mode selection intuitive. | MEDIUM | IUnitInfo provides hierarchical unit structure. Each parameter has a unitId linking it to a group. Not all plugins implement IUnitInfo, so fallback to flat list is needed. |
+| Focus Mode persistence | Remembered per plugin class ID across sessions. User does not re-mark params every time. | LOW | Store as JSON: `{ classId: [paramId, paramId, ...] }`. Save alongside or separate from .vstpreset. |
+| Semantic parameter naming for AI | Rename "Param 42" to "reverb_decay_time" so AI tools read naturally in MCP | MEDIUM | User-defined aliases stored in Focus Mode config. MCP tools use alias if set, fall back to plugin-provided title. |
 
-### Preset Management (Advanced)
-
-| Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| Parameter-level preset storage | Human/AI-readable preset representation alongside binary state | Medium | Store presets as `{paramID: normalizedValue, ...}` maps WITH display values. Enables: partial preset application ("apply only the EQ settings"), AI-readable descriptions, and preset diffs. SUPPLEMENT to binary state, not replacement -- some plugin state is not in parameters. |
-| Preset A/B comparison | Compare AI-modified state vs original | Low | Store two full state snapshots, provide toggle mechanism and parameter-level diff. Essential UX for iterative AI tweaking. |
-| Preset indexing and search | Find presets by name, tags, characteristics | Medium | Scan preset directories, parse .vstpreset metadata, build searchable index by plugin classID, name, source (factory/user/ai-generated), tags. |
-| Program list support (IUnitInfo) | Access built-in plugin program lists | Medium | Some plugins expose program lists via IUnitInfo. Host can enumerate and select programs. Enables "start from the warm pad preset" type AI commands. |
-
-### Processing Intelligence
+#### MCP Server (AI Control Interface)
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Plugin chain management | Route audio through multiple plugins in series | Medium | Essential for real workflows: EQ -> Compressor -> Reverb. Manage buffer passing between plugins, accumulate latency compensation, maintain per-plugin state. |
-| Batch rendering | Process multiple files with same chain/settings | Low | Iterate over input files, reuse loaded plugin instances and state. Avoid per-file plugin instantiation overhead. |
-| Audio analysis feedback | Quantify the effect of AI changes | Medium | Compute loudness (LUFS), peak levels, spectral centroid, RMS before and after processing. Return as structured data. Enables AI to verify: "I tried to make it brighter -- did the spectral centroid actually shift up?" |
-| Sample rate flexibility | Process at elevated quality when offline | Low | Since we're offline, can process at 88.2k or 96k for quality, then downsample. Plugin must accept the rate in ProcessSetup -- negotiate gracefully. |
-| Progress reporting | Track completion of long offline renders | Low | Count blocks processed vs total, estimate time remaining. Important for large files and plugin chains. |
+| MCP tool: list exposed parameters | AI discovers what it can control. Returns only Focus Mode params with names, ranges, current values. | LOW | Already partially exists (scan, load, process tools). Needs filtering by Focus Mode set. |
+| MCP tool: get parameter value | AI reads current parameter state with display string ("3.5 dB") not just normalized float | LOW | Wrap getParamNormalized + getParamStringByValue. Filter by Focus Mode. |
+| MCP tool: set parameter value | AI writes parameter values. Accept both normalized (0.0-1.0) and display values ("3.5 dB") | MEDIUM | Need IParameterChanges for proper delivery to processor. Also need normalizedParamToPlain/plainParamToNormalized for unit conversion. beginEdit/performEdit/endEdit sequence required. |
+| MCP tool: batch parameter set | Set multiple params atomically in one call. Critical for coordinated changes (e.g., EQ band freq+gain+Q together). | MEDIUM | Deliver all changes in same process() call via IParameterChanges with multiple IParamValueQueue entries. |
+| MCP tool: save/load preset | AI can snapshot and recall states. Already exists but needs Focus Mode awareness. | LOW | Already implemented. Add metadata about which params were Focus-exposed. |
+| MCP tool: get plugin info | AI learns what plugin is loaded, its category, vendor, bus configuration | LOW | Already partially exists in load_plugin response. Formalize as dedicated tool. |
+| MCP resource: parameter schema | Expose parameter metadata as MCP resource so AI can reason about available controls without tool calls | LOW | Static data after plugin load. Publish as resource with parameter names, ranges, units, groups. |
 
-### Robustness
+#### Real-Time Processing (beyond offline)
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Plugin scan crash protection | Survive buggy plugin initialization | High | Run scanning in a subprocess. If a plugin crashes during scan, the subprocess dies but the main host survives. Mark that plugin as problematic, continue scanning others. JUCE and most DAWs do this. |
-| Hidden message loop for headless operation | Prevent the ~5% of plugins that render silence without a GUI message loop | Medium | CRITICAL: Some plugins require a platform message loop even when no GUI is displayed. Without it, they produce silence or fail to initialize. Solution: start a platform event loop (e.g., via JUCE GUI app template or platform-specific init) but never create windows. This is a known gotcha documented in JUCE forums. |
-| Graceful timeout handling | Detect and recover from hung plugins | Medium | Set processing timeouts. If `process()` doesn't return within threshold, terminate plugin process and report error. Prevents indefinite hangs on misbehaving plugins. |
-| State round-trip verification | Catch save/load bugs early | Low | After setState, rescan parameters and compare to expected values. REAPER has documented issues with VST3 parameter persistence -- don't trust that setState "just works". |
+| Real-time audio streaming | Process live audio (microphone, system audio) not just files. Enables live performance AI control. | HIGH | Requires audio I/O backend (CPAL or JACK on Linux). Must run process() on audio thread with real-time constraints. Significantly changes architecture from current offline model. |
+| MIDI event routing | Pass MIDI to instrument plugins. AI can trigger notes, send CC, program changes. | MEDIUM | Requires IEventList implementation. Build Event structs with kNoteOnEvent/kNoteOffEvent, set sampleOffset for timing. Current process() passes null inputEvents. |
+| Process context (transport info) | Provide tempo, time signature, bar position to plugin. Many effects/instruments use transport info. | MEDIUM | ProcessContext struct with tempo, timeSigNumerator/Denominator, projectTimeSamples. Currently passes null processContext. |
 
----
+#### Child Plugin GUI
 
-## Anti-Features
+| Feature | Value Proposition | Complexity | Notes |
+|---------|-------------------|------------|-------|
+| Display child plugin GUI (IPlugView) | Users need visual feedback and manual control alongside AI control | HIGH | Platform-specific: Linux requires X11 XEmbed or Wayland subsurface. Must call createView("editor"), attached(parentWindow), onSize(). Need IPlugFrame for resize callbacks. Many cross-platform pitfalls. |
+| Wrapper UI (param list + Focus Mode toggles) | UI for marking which params are exposed to AI | HIGH | Needs a custom UI framework. Could be terminal-based initially (simpler) or full GUI (egui/iced). |
+| Side-by-side: wrapper UI + child GUI | See plugin GUI and Focus Mode controls simultaneously | HIGH | Window management complexity. Either embed child in wrapper window or coordinate two windows. |
 
-Features to explicitly NOT build.
+### Anti-Features (Commonly Requested, Often Problematic)
 
-| Anti-Feature | Why Avoid | What to Do Instead |
-|--------------|-----------|-------------------|
-| Plugin GUI rendering | Headless by design. GUI adds massive platform complexity (windowing, event loops, rendering, plugin view embedding). No user is looking at plugin UIs. | Expose all control via MCP tools and parameter API. Still need hidden message loop (see robustness above). |
-| DAW-style timeline/arrangement | Scope creep. Not needed for AI-controlled processing of audio files. | Simple input-file -> plugin chain -> output-file pipeline. |
-| VST2 support | Deprecated. Steinberg discontinued licensing. Ecosystem has moved to VST3. | VST3 only. |
-| CLAP plugin support | Different API entirely. Doubles hosting complexity. | VST3 first. CLAP could be a future milestone if demand exists. |
-| Real-time audio device I/O | Adds CPAL dependency, real-time thread constraints, ASIO/CoreAudio/ALSA driver management. Separate domain. | Start with offline file-based rendering. Add real-time as a future milestone. |
-| Plugin marketplace/download | Out of scope. Users install their own plugins. | Scan system paths only. |
-| ARA (Audio Random Access) | Specialized protocol for tight DAW integration (Melodyne, etc.). Irrelevant for headless batch processing. | Standard VST3 processing only. |
-| MIDI device enumeration | No live MIDI input. AI generates parameter changes, not MIDI performance. | Support programmatic MIDI event injection for instrument plugins, but no device management. |
-| Visual waveform/spectrum display | No GUI. | Return analysis data as structured output (JSON) for potential frontend consumption. |
+Features that seem appealing but create disproportionate complexity or architectural problems.
 
----
+| Feature | Why Requested | Why Problematic | Alternative |
+|---------|---------------|-----------------|-------------|
+| Plugin chaining (load multiple plugins in series) | "Process through EQ then compressor then reverb" | Massively increases complexity: routing matrix, per-plugin state, latency compensation between plugins, ordering UI. This is building a DAW. | Load one plugin at a time. Chain by processing audio files sequentially (output of plugin A becomes input to plugin B). The MCP server can orchestrate this. |
+| Real-time MIDI generation by AI | "AI plays melodies in real-time" | Timing precision requires sub-millisecond scheduling. AI inference latency (100ms+) makes real-time MIDI generation musically useless. | Offline MIDI: AI generates MIDI file, host renders it through instrument plugin. Timing is perfect because it is not real-time. |
+| Parameter automation curves | "Record parameter changes over time like a DAW" | Requires timeline, transport, automation lane UI, sample-accurate playback. This is a DAW feature, not a wrapper feature. | Snapshot-based: AI sets params, processes audio, done. For time-varying params, AI generates multiple snapshots and wrapper processes segments. |
+| Multi-format support (VST2, AU, LV2, CLAP) | "Support all plugin formats" | Each format has completely different APIs, lifecycle, parameter models. VST2 is officially deprecated. AU is macOS-only. LV2 and CLAP have different architectures. | VST3 only. It is the industry standard with the broadest cross-platform support. If CLAP gains significant traction, add it as a second format later. |
+| Sandboxed plugin loading (out-of-process) | "Isolate plugin crashes from host" | Requires IPC for all COM calls (process, parameter get/set, GUI events). Audio data must cross process boundary every block. Extreme complexity for marginal benefit in an offline tool. | In-process loading with graceful error handling. Catch panics around plugin calls. For scanning, use separate process (already common pattern). |
+| Custom DSP (built-in EQ, compressor, etc.) | "Add basic processing without loading a plugin" | Scope creep. Every built-in effect is a maintenance burden and competes with dedicated plugins that do it better. | The wrapper wraps plugins. If user wants EQ, they load an EQ plugin. |
+| DAW integration (ReWire, ARA, inter-app audio) | "Use inside my DAW" | These are heavyweight integration protocols. ReWire is dead. ARA is for specific use cases (audio editing). Inter-app audio is iOS only. | Standalone tool that processes files. DAW users export audio, process with AgentAudio, import back. Or wrap AgentAudio as a VST3 plugin itself (future, very complex). |
 
 ## Feature Dependencies
 
 ```
-Plugin Scanning ──────> Plugin Loading ──────> Audio Processing Pipeline
-       │                      │                        │
-       │                      ├──> Parameter Enumeration ──> Parameter Change Delivery
-       │                      │           │                         │
-       │                      │           └──> Unit/Group Discovery ──> Focus Mode (AI subset)
-       │                      │                                              │
-       │                      │                                     AI Context Window Mgmt
-       │                      │
-       │                      ├──> State Save/Restore ──> Preset Management
-       │                      │         │                       │
-       │                      │         ├──> A/B Comparison     │
-       │                      │         └──> Diff/Delta Tracking│
-       │                      │                                 │
-       │                      └──> Bus Configuration ───────────┘
-       │
-       └──> Metadata Caching (avoid re-scanning)
-
-Audio Processing ──> Plugin Chain Management ──> Batch Rendering
-       │
-       └──> Audio Analysis (pre/post comparison)
-
-Parameter Enumeration ──> Semantic Classification ──> Importance Ranking
-                                    │
-                                    └──> Intent Mapping ("brighter" -> high-freq EQ params)
+[Plugin Scanning]
+    |
+    v
+[Plugin Loading (lifecycle state machine)]
+    |
+    +------> [Parameter Enumeration]
+    |             |
+    |             +------> [Parameter Read/Write]
+    |             |             |
+    |             |             +------> [Focus Mode (param filtering)]
+    |             |             |             |
+    |             |             |             +------> [MCP Parameter Tools]
+    |             |             |                         |
+    |             |             |                         +------> [MCP Resource: param schema]
+    |             |             |
+    |             |             +------> [IParameterChanges delivery]
+    |             |
+    |             +------> [Parameter Display Strings]
+    |             |
+    |             +------> [Unit Hierarchy (IUnitInfo)]
+    |
+    +------> [Audio Processing (offline)]
+    |             |
+    |             +------> [Process Context (transport)]
+    |             |
+    |             +------> [MIDI Event Routing]
+    |             |
+    |             +------> [Real-Time Audio Streaming]
+    |
+    +------> [State Save/Load (.vstpreset)]
+    |             |
+    |             +------> [Focus Mode Persistence]
+    |
+    +------> [Child Plugin GUI (IPlugView)]
+                  |
+                  +------> [Wrapper UI (Focus Mode toggles)]
+                                |
+                                +------> [Side-by-side UI]
 ```
 
----
+### Dependency Notes
 
-## Parameter Exposure Strategies for AI Context Windows
+- **Focus Mode requires Parameter Enumeration + Read/Write:** Cannot filter params you cannot enumerate or control.
+- **MCP Parameter Tools require Focus Mode:** Without filtering, AI gets 200 params and produces garbage. Focus Mode is not optional for practical AI control.
+- **IParameterChanges delivery required for correct parameter writing:** setParamNormalized on controller works for display sync but does NOT reliably reach the processor. The spec requires changes via ProcessData.inputParameterChanges.
+- **Real-Time Audio requires fundamental architecture change:** Current offline model is synchronous. Real-time needs audio thread, callback-based processing, lock-free communication.
+- **Child Plugin GUI conflicts with headless operation:** GUI requires display server (X11/Wayland). Server deployments and CI environments have no display. Must remain functional without GUI.
+- **MIDI Event Routing enhances Audio Processing:** Instrument plugins (synths, samplers) are non-functional without MIDI input. Adding MIDI unlocks an entire plugin category.
 
-This is the core differentiator. Plugins can have 50-500+ parameters. An AI context window cannot reason about all of them.
+## MVP Definition
 
-### Strategy 1: Unit-Based Focusing (Primary -- Best Quality)
+### Launch With (v1)
 
-Use VST3 Unit hierarchy to present structural parameter subsets.
+Minimum viable product -- what is needed to validate that AI can usefully control a VST3 plugin.
 
-```
-Example: Channel strip plugin with IUnitInfo:
-  Root Unit (id=0)
-  +-- EQ Unit (id=1) -- 20 parameters
-  |   +-- Band 1 (id=4): freq, gain, Q, type, enable
-  |   +-- Band 2 (id=5): freq, gain, Q, type, enable
-  |   +-- Band 3 (id=6): freq, gain, Q, type, enable
-  |   +-- Band 4 (id=7): freq, gain, Q, type, enable
-  +-- Compressor Unit (id=2) -- 8 parameters
-  |   threshold, ratio, attack, release, knee, makeup, sidechain, enable
-  +-- Output Unit (id=3) -- 4 parameters
-      level, pan, phase, mute
+- [x] Plugin scanning and loading -- already done
+- [x] Offline audio processing -- already done
+- [x] Parameter enumeration and read -- already done
+- [x] State save/load (.vstpreset) -- already done
+- [ ] **Parameter write via IParameterChanges** -- critical gap. Current implementation queues but does not deliver. Without this, AI cannot actually change plugin behavior.
+- [ ] **Parameter display strings** -- AI needs "3.5 dB" not "0.72". Small effort, high impact.
+- [ ] **Parameter flag interpretation** -- filter out kIsReadOnly, kIsHidden. Prevent AI from trying to write read-only params.
+- [ ] **Focus Mode (basic)** -- JSON config mapping classId to list of exposed paramIds. MCP tools filter by this set.
+- [ ] **MCP tools for parameter control** -- list_params, get_param, set_param, filtered by Focus Mode.
 
-User says "make the vocal brighter":
-  -> Focus to EQ Unit -> 20 parameters
-  -> Further focus to high-freq bands -> 10 parameters
-```
+### Add After Validation (v1.x)
 
-**Caveat:** Not all plugins implement IUnitInfo. Need fallback strategies.
+Features to add once core parameter control is proven with real plugins.
 
-### Strategy 2: Flag-Based Filtering (Always Available)
+- [ ] **Batch parameter set** -- set multiple params in one call for coordinated changes
+- [ ] **Unit hierarchy (IUnitInfo)** -- organize params into groups for better Focus Mode UX
+- [ ] **Semantic parameter aliases** -- user-defined names for MCP readability
+- [ ] **MIDI event routing** -- unlock instrument plugins (synths, samplers)
+- [ ] **Process context** -- provide tempo/transport info for time-aware plugins
+- [ ] **restartComponent handling** -- respond to kLatencyChanged, kParamValuesChanged, kIoChanged properly
+- [ ] **Focus Mode persistence** -- save/load Focus Mode configs per plugin
 
-```
-Exclude: kIsReadOnly, kIsHidden, kIsBypass (handle bypass separately)
-Prioritize: kCanAutomate (the "important" parameters plugins expose)
-```
+### Future Consideration (v2+)
 
-### Strategy 3: Semantic Name Analysis (Fallback When No Units)
+Features to defer until product-market fit is established.
 
-```
-Tone keywords:     "freq", "high", "treble", "bright", "presence", "air", "tone", "tilt"
-Dynamics keywords: "threshold", "ratio", "attack", "release", "compress", "gate", "limit"
-Spatial keywords:  "reverb", "delay", "room", "size", "decay", "wet", "dry", "width", "pan"
-Level keywords:    "gain", "volume", "level", "output", "input", "mix", "drive"
-```
+- [ ] **Child plugin GUI (IPlugView)** -- requires platform windowing, significant complexity. Terminal-based param control is sufficient for AI use case.
+- [ ] **Real-time audio streaming** -- fundamentally different architecture. Validate offline first.
+- [ ] **Wrapper UI** -- graphical Focus Mode editor. Defer until Focus Mode concept is validated via config files.
+- [ ] **MCP resource: parameter schema** -- nice optimization but tools work fine for MVP
 
-### Strategy 4: Importance Ranking
+## Feature Prioritization Matrix
 
-```
-1. Wide-range continuous params are more impactful than toggles
-2. Params far from default are already "in use" and more contextually relevant
-3. Plugin category informs ranking (EQ plugin -> frequency/gain params rank highest)
-4. User intent narrows further ("brighter" -> high-frequency params)
-```
+| Feature | User Value | Implementation Cost | Priority |
+|---------|------------|---------------------|----------|
+| IParameterChanges delivery | HIGH | MEDIUM | P1 |
+| Parameter display strings | HIGH | LOW | P1 |
+| Parameter flag filtering | HIGH | LOW | P1 |
+| Focus Mode (basic JSON config) | HIGH | LOW | P1 |
+| MCP param tools (list/get/set) | HIGH | MEDIUM | P1 |
+| Batch parameter set | MEDIUM | MEDIUM | P2 |
+| IUnitInfo hierarchy | MEDIUM | MEDIUM | P2 |
+| MIDI event routing | HIGH | MEDIUM | P2 |
+| Process context (transport) | MEDIUM | LOW | P2 |
+| restartComponent handling | MEDIUM | MEDIUM | P2 |
+| Semantic param aliases | LOW | LOW | P2 |
+| Focus Mode persistence | MEDIUM | LOW | P2 |
+| Child plugin GUI | MEDIUM | HIGH | P3 |
+| Real-time audio | HIGH | HIGH | P3 |
+| Wrapper UI (graphical) | MEDIUM | HIGH | P3 |
+| MCP resource schema | LOW | LOW | P3 |
 
-### Recommended Combined Approach
+**Priority key:**
+- P1: Must have for launch (AI cannot control plugins without these)
+- P2: Should have, add when core is proven
+- P3: Nice to have, future consideration
 
-```
-1. Try IUnitInfo for structural grouping (best, not always available)
-2. Apply flag filtering to remove noise (always available)
-3. Use semantic name analysis for intent mapping (always available)
-4. Apply importance ranking to order results (always available)
-5. Present top-N parameters to AI (target: 5-15 per interaction round)
-```
+## Competitor Feature Analysis
 
----
+| Feature | Carla MCP Server | Blue Cat Patchwork | DDMF Metaplugin | AgentAudio (Our Approach) |
+|---------|-----------------|-------------------|-----------------|--------------------------|
+| Plugin format support | VST2/3, LV2, LADSPA, AU, SF2/SFZ | VST, VST3, AU, AAX | VST, VST3, AU | VST3 only (focused) |
+| Plugin chaining | Yes (full routing) | Yes (64 slots, serial+parallel) | Yes (8 channels, routing matrix) | No -- single plugin, chain via file processing |
+| Parameter control | 45 tools, NLP support | GUI-based, MIDI mapping | GUI-based | MCP tools, Focus Mode filtering |
+| AI integration | NLP interface, JACK-based | None | None | Native MCP server, Focus Mode for AI curation |
+| Real-time audio | Yes (JACK) | Yes (plugin format) | Yes (plugin format) | Offline first, real-time later |
+| GUI display | Carla GUI + plugin GUIs | Host GUI + plugin GUIs | Host GUI + plugin GUIs | Headless first, GUI later |
+| State management | Session snapshots | DAW-managed | DAW-managed | .vstpreset files |
+| Deployment model | Standalone app (Linux-focused) | DAW plugin | DAW plugin | Standalone MCP server |
 
-## Preset Management Implementation Patterns
-
-### Pattern 1: Direct State Serialization (MVP)
-
-Works with every VST3 plugin. Most reliable.
-
-```
-Save:  IComponent::getState(stream) -> processor blob
-       IEditController::getState(stream) -> controller blob (optional)
-       Store both with metadata (plugin classID, timestamp, label)
-
-Load:  IComponent::setState(stream) <- processor blob
-       IEditController::setComponentState(stream) <- SAME processor blob (syncs controller)
-       IEditController::setState(stream) <- controller blob (if saved)
-       Rescan all parameter values via getParamNormalized()
-```
-
-### Pattern 2: .vstpreset Format (Interoperability)
-
-Enables preset sharing with Cubase, other DAWs.
-
-```
-Binary structure:
-  Header (48B): "VST3"(4B) | version(4B) | classID(32B) | chunkListOffset(8B)
-  Data:         [processor state chunk "Comp"] [controller state chunk "Cont"]
-  Chunk list:   "List"(4B) | count(4B) | entries[]{id(4B), offset(8B), size(8B)}
-
-SDK PresetFile class handles read/write.
-```
-
-### Pattern 3: Parameter-Level Storage (AI Interaction Supplement)
-
-Store as structured `{paramID: {normalized, display, name}}` maps alongside binary state.
-
-Enables: human-readable diffs, partial application, AI-readable descriptions.
-**Not a replacement for binary state** -- some plugin internals are not in parameters.
-
----
-
-## Real-World Host Lessons
-
-### Bitwig Studio
-- Five sandbox levels: "within engine" to "individual per instance"
-- Crash recovery replaces crashed plugin UI with reload notification
-- **Lesson:** Plugin isolation is worth the complexity for production use
-
-### REAPER
-- Documented VST3 parameter persistence bugs on save/reload
-- **Lesson:** Always verify state round-trips. Don't trust setState blindly.
-
-### Cubase/Nuendo
-- Direct Offline Processing (DOP): process audio through plugins non-realtime using `setIoMode(kOfflineProcessing)`
-- **Lesson:** Offline VST3 processing is a well-supported, first-class path in the spec
-
-### Plugalyzer (Headless CLI Host)
-- Reads audio/MIDI, processes through plugin, writes output. No GUI.
-- **Lesson:** Validates headless approach, but is a simple tool -- we're building something more sophisticated
-
-### Sushi (Elk Audio OS)
-- Track-based headless DAW on embedded Linux. Plugin chains, MIDI, full hosting.
-- **Lesson:** Production headless VST3 hosting is proven at scale
-
-### JUCE AudioPluginHost
-- `moduleinfo.json` for fast scanning without loading binaries
-- Parameter updates cached from audio thread, dispatched at 60Hz on message thread
-- `juce_audio_processors_headless` module exists for GUI-less hosting
-- **Lesson:** JUCE provides battle-tested infrastructure. Study its approach even if not using JUCE directly.
-
----
-
-## MVP Recommendation
-
-**Phase 1 -- Single Plugin Processing (Table Stakes):**
-1. Plugin scanning and discovery with metadata caching
-2. Plugin loading, instantiation, lifecycle management
-3. Audio bus configuration (stereo in/out minimum)
-4. Offline block-based processing pipeline
-5. Full parameter enumeration with metadata
-6. Parameter read/write with proper process() delivery
-7. State save/restore (binary blob)
-8. Hidden message loop (prevents ~5% of plugins rendering silence)
-9. IComponentHandler implementation
-10. MCP tool interface for all above
-
-**Phase 2 -- Chain, State, and Focus:**
-1. Plugin chain management (multiple plugins in series)
-2. .vstpreset read/write for interoperability
-3. Unit-based parameter grouping (IUnitInfo)
-4. Semantic parameter classification and Focus Mode
-5. Scan crash protection (subprocess scanning)
-6. Tail and latency handling
-7. Preset A/B comparison
-
-**Phase 3 -- Intelligence and Polish:**
-1. Audio analysis feedback (pre/post loudness, spectrum)
-2. Parameter importance ranking
-3. Batch rendering
-4. Preset indexing and search
-5. State round-trip verification
-6. Plugin compatibility tracking (which plugins work well headless)
-
-**Defer Indefinitely:**
-- Plugin GUI rendering
-- Realtime audio device I/O
-- VST2/CLAP/AU support
-- ARA support
-- MIDI device management
-- DAW timeline/arrangement
-
----
+**Key insight:** Carla MCP Server is the closest competitor, offering 45 tools with NLP support. However, it wraps Carla (a full-featured plugin host), which means it carries enormous complexity. AgentAudio's advantage is Focus Mode -- the insight that AI does not need all 200 parameters, it needs the 5-10 that matter for the current task. No competitor offers parameter curation for AI consumption.
 
 ## Sources
 
-### Official Steinberg Documentation (HIGH confidence)
-- [VST 3 Developer Portal](https://steinbergmedia.github.io/vst3_dev_portal/)
-- [VST 3 API Documentation](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical+Documentation/API+Documentation/Index.html)
-- [Parameters and Automation](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical+Documentation/Parameters+Automation/Index.html)
-- [Presets and Program Lists](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical+Documentation/Presets+Program+Lists/Index.html)
-- [Preset Format Specification](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical+Documentation/Locations+Format/Preset+Format.html)
-- [VST 3 Units](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical+Documentation/VST+3+Units/Index.html)
-- [Processing FAQ](https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Processing.html)
-- [Plugin Type SubCategories](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/group__plugType.html)
-- [IComponentHandler Reference](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IComponentHandler.html)
-- [IEditController Reference](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IEditController.html)
+- [VST3 Developer Portal - Parameters and Automation](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical+Documentation/Parameters+Automation/Index.html) - HIGH confidence
+- [VST3 Developer Portal - Hosting FAQ](https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Hosting.html) - HIGH confidence
+- [IEditController Class Reference](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IEditController.html) - HIGH confidence
+- [IComponentHandler Class Reference](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IComponentHandler.html) - HIGH confidence
+- [IPlugView Class Reference](https://steinbergmedia.github.io/vst3_doc/base/classSteinberg_1_1IPlugView.html) - HIGH confidence
+- [IParameterChanges Class Reference](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IParameterChanges.html) - HIGH confidence
+- [VST3 Units Documentation](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical+Documentation/VST+3+Units/Index.html) - HIGH confidence
+- [Presets and Program Lists](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical+Documentation/Presets+Program+Lists/Index.html) - HIGH confidence
+- [Carla MCP Server](https://mcp.aibase.com/server/1538249238906150913) - MEDIUM confidence (third-party listing)
+- [DDMF Metaplugin](https://ddmf.eu/metaplugin-chainer-vst-au-rtas-aax-wrapper/) - MEDIUM confidence
+- [Steinberg Forums - IEditController::setParamNormalized hosting](https://forums.steinberg.net/t/vst3-hosting-when-to-use-ieditcontroller-setparamnormalized/787800) - MEDIUM confidence
+- [KVR Forum - VST3 host IPlugView GUI display](https://www.kvraudio.com/forum/viewtopic.php?t=334466) - LOW confidence
 
-### Real-World Host Implementations (MEDIUM confidence)
-- [Bitwig Crash Protection](https://www.bitwig.com/learnings/plug-in-hosting-crash-protection-in-bitwig-studio-20/)
-- [Bitwig Plugin Handling Options](https://www.bitwig.com/userguide/latest/vst_plug-in_handling_and_options/)
-- [Sushi - Elk Audio Headless DAW](https://github.com/elk-audio/sushi)
-- [Plugalyzer - Command-line VST3 Host](https://github.com/CrushedPixel/Plugalyzer)
-- [Robust VST3 Host in Rust (cutoff-vst)](https://renauddenis.com/case-studies/rust-vst)
-
-### Community Discussion (MEDIUM confidence)
-- [JUCE Headless VST3 Host Silence Issue](https://forum.juce.com/t/headless-vst3-host-some-plugins-render-silence/58169)
-- [KVR: What does scanning VST plugins mean](https://www.kvraudio.com/forum/viewtopic.php?t=530945)
-- [JUCE VST3 Parameter Updates Discussion](https://forum.juce.com/t/vst3-parameter-updates-automation-vs-host-refresh/67373)
-- [Steinberg Forums: Plugin Crash During Scanning](https://forums.steinberg.net/t/vst3-host-plugin-crash-while-scanning-bundleentry-bundleexit/776824)
+---
+*Feature research for: VST3 wrapper plugin with AI parameter control via MCP*
+*Researched: 2026-02-15*
