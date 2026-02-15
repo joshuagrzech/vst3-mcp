@@ -8,7 +8,7 @@ use std::ffi::c_void;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 use tracing::{debug, error, info, warn};
@@ -35,42 +35,10 @@ use super::xembed::{self, XEmbedAtoms};
 /// The VST3 platform type string for X11 embedding.
 const PLATFORM_TYPE_X11: &[u8] = b"X11EmbedWindowID\0";
 
-// #region agent log
-fn agent_log(
-    run_id: &str,
-    hypothesis_id: &str,
-    location: &str,
-    message: &str,
-    data: serde_json::Value,
-) {
-    use std::io::Write;
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let payload = serde_json::json!({
-        "id": format!("log_{}_{}", std::process::id(), ts),
-        "timestamp": ts,
-        "location": location,
-        "message": message,
-        "data": data,
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-    });
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/home/josh/Developer/vst3-mcp/.cursor/debug.log")
-    {
-        let _ = writeln!(f, "{}", payload);
-    }
-}
-// #endregion
-
 /// State for the editor window once created.
 struct EditorState {
-    /// The winit window (kept alive to maintain X11 window lifetime).
-    _window: Window,
+    /// The winit window.
+    window: Arc<Window>,
     /// The plugin's IPlugView COM pointer.
     plug_view: ComPtr<IPlugView>,
     /// The IPlugFrame COM wrapper (must stay alive while plug_view references it).
@@ -91,6 +59,10 @@ struct EditorState {
     poll_events: Events,
     /// Whether the XEmbed handshake is complete.
     xembed_complete: bool,
+    /// Pending resize from IPlugFrame::resizeView (shared with PlugFrame).
+    pending_resize: super::plugframe::PendingResize,
+    /// Current window size in physical pixels (tracks actual size to skip no-op resizes).
+    current_size: (u32, u32),
 }
 
 /// Application handler for the editor window event loop.
@@ -103,6 +75,11 @@ struct EditorApp {
     state: Option<EditorState>,
     /// Shared run loop (created before event loop).
     runloop: Arc<HostRunLoop>,
+    /// One-shot sender to signal that the editor opened (or failed).
+    /// Consumed on first use so we only signal once.
+    opened_tx: Option<std::sync::mpsc::Sender<Result<(), String>>>,
+    /// External close signal (set by close_editor tool).
+    close_signal: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl EditorApp {
@@ -110,12 +87,29 @@ impl EditorApp {
         plugin: Arc<Mutex<Option<PluginInstance>>>,
         plugin_name: String,
         runloop: Arc<HostRunLoop>,
+        opened_tx: std::sync::mpsc::Sender<Result<(), String>>,
+        close_signal: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             plugin,
             plugin_name,
             state: None,
             runloop,
+            opened_tx: Some(opened_tx),
+            close_signal,
+        }
+    }
+}
+
+impl EditorApp {
+    /// Properly tear down the editor: call IPlugView::removed(), clear frame, then drop state.
+    fn cleanup_editor(&mut self) {
+        if let Some(state) = self.state.take() {
+            unsafe {
+                state.plug_view.removed();
+                state.plug_view.setFrame(std::ptr::null_mut());
+            }
+            // state is now dropped (window, plug_frame, etc.)
         }
     }
 }
@@ -126,18 +120,6 @@ impl ApplicationHandler for EditorApp {
             return; // Already initialized
         }
 
-        // #region agent log
-        agent_log(
-            "pre-fix",
-            "H0",
-            "src/gui/window.rs:EditorApp::resumed",
-            "resumed called; creating editor state",
-            serde_json::json!({
-                "plugin_name": self.plugin_name,
-            }),
-        );
-        // #endregion
-
         match create_editor_state(
             event_loop,
             &self.plugin,
@@ -147,27 +129,17 @@ impl ApplicationHandler for EditorApp {
             Ok(state) => {
                 info!("Editor window created successfully");
                 self.state = Some(state);
-                // #region agent log
-                agent_log(
-                    "pre-fix",
-                    "H0",
-                    "src/gui/window.rs:EditorApp::resumed",
-                    "create_editor_state Ok",
-                    serde_json::json!({}),
-                );
-                // #endregion
+                // Signal that the editor opened successfully
+                if let Some(tx) = self.opened_tx.take() {
+                    let _ = tx.send(Ok(()));
+                }
             }
             Err(e) => {
                 error!("Failed to create editor window: {}", e);
-                // #region agent log
-                agent_log(
-                    "pre-fix",
-                    "H0",
-                    "src/gui/window.rs:EditorApp::resumed",
-                    "create_editor_state Err; exiting event loop",
-                    serde_json::json!({"error": e}),
-                );
-                // #endregion
+                // Signal the error so open_editor doesn't hang
+                if let Some(tx) = self.opened_tx.take() {
+                    let _ = tx.send(Err(e.clone()));
+                }
                 event_loop.exit();
             }
         }
@@ -182,8 +154,7 @@ impl ApplicationHandler for EditorApp {
         match event {
             WindowEvent::CloseRequested => {
                 info!("Editor window close requested");
-                // Clean up the editor state (calls IPlugView::removed in Drop)
-                self.state.take();
+                self.cleanup_editor();
                 event_loop.exit();
             }
             WindowEvent::Focused(focused) => {
@@ -215,44 +186,46 @@ impl ApplicationHandler for EditorApp {
                     }
                 }
             }
-            WindowEvent::Resized(size) => {
-                if let Some(state) = &self.state {
-                    let mut rect = ViewRect {
-                        left: 0,
-                        top: 0,
-                        right: size.width as i32,
-                        bottom: size.height as i32,
-                    };
-                    unsafe {
-                        let result = state.plug_view.onSize(&mut rect);
-                        if result != kResultOk {
-                            debug!("IPlugView::onSize returned {}", result);
-                        }
-                    }
-                }
+            WindowEvent::Resized(_size) => {
+                // Do NOT call plug_view.onSize() here.
+                // Resize is handled via the pending_resize mechanism in about_to_wait,
+                // which calls onSize exactly once per resizeView request.
+                // Calling onSize from here causes a feedback loop where the plugin
+                // repositions its child window on every frame.
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Check external close signal
+        if self.close_signal.load(std::sync::atomic::Ordering::Relaxed) {
+            info!("External close signal received, closing editor");
+            self.cleanup_editor();
+            event_loop.exit();
+            return;
+        }
+
         let Some(state) = &mut self.state else {
             return;
         };
 
-        // 1. Poll X11 events for CreateNotify (child window detection)
+        // 1. Handle pending resize from IPlugFrame::resizeView
+        apply_pending_resize(state);
+
+        // 2. Poll X11 events for CreateNotify (child window detection)
         poll_x11_events(state);
 
-        // 2. Dispatch IRunLoop timers
+        // 3. Dispatch IRunLoop timers
         state.runloop.dispatch_timers();
 
-        // 3. Poll registered FDs and dispatch to event handlers
+        // 4. Poll registered FDs and dispatch to event handlers
         poll_and_dispatch_fds(state);
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // Ensure editor state is cleaned up
-        self.state.take();
+        self.cleanup_editor();
         info!("Editor event loop exiting");
     }
 }
@@ -275,33 +248,9 @@ fn create_editor_state(
         .controller()
         .ok_or_else(|| "Plugin has no edit controller".to_string())?;
 
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H2",
-        "src/gui/window.rs:create_editor_state",
-        "about to call createView(editor)",
-        serde_json::json!({
-            "plugin_name": plugin_name,
-            "controller_ptr_is_null": controller.as_ptr().is_null(),
-        }),
-    );
-    // #endregion
-
     let plug_view: ComPtr<IPlugView> = unsafe {
         let view_ptr = controller.createView(b"editor\0".as_ptr() as *const i8);
         if view_ptr.is_null() {
-            // #region agent log
-            agent_log(
-                "pre-fix",
-                "H2",
-                "src/gui/window.rs:create_editor_state",
-                "createView returned null",
-                serde_json::json!({
-                    "plugin_name": plugin_name,
-                }),
-            );
-            // #endregion
             return Err("createView returned null -- plugin may not have an editor".to_string());
         }
         ComPtr::from_raw(view_ptr)
@@ -312,18 +261,6 @@ fn create_editor_state(
     let supported = unsafe {
         plug_view.isPlatformTypeSupported(PLATFORM_TYPE_X11.as_ptr() as *const i8)
     };
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H3",
-        "src/gui/window.rs:create_editor_state",
-        "checked isPlatformTypeSupported(X11EmbedWindowID)",
-        serde_json::json!({
-            "plugin_name": plugin_name,
-            "supported_result": supported,
-        }),
-    );
-    // #endregion
     if supported != kResultOk {
         return Err(format!(
             "Plugin doesn't support X11EmbedWindowID (returned {})",
@@ -353,31 +290,20 @@ fn create_editor_state(
     // Drop plugin lock before creating window (no longer needed)
     drop(plugin_guard);
 
-    // Create winit window
+    // Create winit window (not user-resizable; plugin controls size via resizeView)
     let window_attrs = WindowAttributes::default()
         .with_title(format!("{} - Plugin Editor", plugin_name))
         .with_inner_size(PhysicalSize::new(width, height))
-        .with_resizable(false); // Fixed size for Phase 04.1
+        .with_resizable(false);
 
-    let window = event_loop
-        .create_window(window_attrs)
-        .map_err(|e| format!("Failed to create window: {}", e))?;
+    let window = Arc::new(
+        event_loop
+            .create_window(window_attrs)
+            .map_err(|e| format!("Failed to create window: {}", e))?,
+    );
 
     // Get X11 Window ID from winit
     let parent_window_id = get_x11_window_id(&window)?;
-
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H1",
-        "src/gui/window.rs:create_editor_state",
-        "created winit window and extracted X11 window id",
-        serde_json::json!({
-            "plugin_name": plugin_name,
-            "parent_window_id_hex": format!("{:08X}", parent_window_id),
-        }),
-    );
-    // #endregion
 
     info!(
         "Created host window {:08X} ({}x{}) for '{}'",
@@ -405,8 +331,11 @@ fn create_editor_state(
         .check()
         .map_err(|e| format!("Failed to apply X11 event mask: {}", e))?;
 
-    // Create IPlugFrame (provides IRunLoop to the plugin)
-    let plug_frame = PlugFrame::new(Arc::clone(&runloop));
+    // Shared pending resize slot (PlugFrame writes, event loop reads)
+    let pending_resize: super::plugframe::PendingResize = Arc::new(Mutex::new(None));
+
+    // Create IPlugFrame (provides IRunLoop to the plugin + resize channel)
+    let plug_frame = PlugFrame::new(Arc::clone(&runloop), Arc::clone(&pending_resize));
 
     // Set the plug frame on the view
     unsafe {
@@ -427,37 +356,11 @@ fn create_editor_state(
             PLATFORM_TYPE_X11.as_ptr() as *const i8,
         );
         if result != kResultOk {
-            // #region agent log
-            agent_log(
-                "pre-fix",
-                "H4",
-                "src/gui/window.rs:create_editor_state",
-                "IPlugView::attached failed",
-                serde_json::json!({
-                    "plugin_name": plugin_name,
-                    "parent_window_id_hex": format!("{:08X}", parent_window_id),
-                    "result": result,
-                }),
-            );
-            // #endregion
             // Clean up on failure
             plug_view.setFrame(std::ptr::null_mut());
             return Err(format!("IPlugView::attached failed with code {}", result));
         }
     }
-
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H5",
-        "src/gui/window.rs:create_editor_state",
-        "IPlugView::attached succeeded; waiting for CreateNotify child window",
-        serde_json::json!({
-            "plugin_name": plugin_name,
-            "parent_window_id_hex": format!("{:08X}", parent_window_id),
-        }),
-    );
-    // #endregion
 
     info!(
         "Plugin editor attached to X11 window {:08X}",
@@ -468,7 +371,7 @@ fn create_editor_state(
     let poller = Poller::new().map_err(|e| format!("Failed to create poller: {}", e))?;
 
     Ok(EditorState {
-        _window: window,
+        window,
         plug_view,
         _plug_frame: plug_frame,
         x11_conn,
@@ -479,6 +382,8 @@ fn create_editor_state(
         poller,
         poll_events: Events::new(),
         xembed_complete: false,
+        pending_resize,
+        current_size: (width, height),
     })
 }
 
@@ -490,21 +395,6 @@ fn get_x11_window_id(window: &Window) -> Result<u32, String> {
         .window_handle()
         .map_err(|e| format!("Failed to get window handle: {}", e))?;
 
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H1",
-        "src/gui/window.rs:get_x11_window_id",
-        "observed raw window handle backend",
-        serde_json::json!({
-            "raw_handle_debug": format!("{:?}", handle.as_raw()),
-            "wayland_display_set": std::env::var("WAYLAND_DISPLAY").is_ok(),
-            "x11_display": std::env::var("DISPLAY").ok(),
-            "winit_backend": std::env::var("WINIT_UNIX_BACKEND").ok(),
-        }),
-    );
-    // #endregion
-
     match handle.as_raw() {
         raw_window_handle::RawWindowHandle::Xlib(xlib) => {
             Ok(xlib.window as u32)
@@ -513,6 +403,46 @@ fn get_x11_window_id(window: &Window) -> Result<u32, String> {
             Ok(xcb.window.get())
         }
         other => Err(format!("Not running on X11 (got {:?})", other)),
+    }
+}
+
+/// Apply a pending resize request from IPlugFrame::resizeView.
+///
+/// Resizes the host window and calls IPlugView::onSize() exactly once,
+/// avoiding the feedback loop that would occur if onSize were called
+/// from the winit Resized event handler.
+fn apply_pending_resize(state: &mut EditorState) {
+    let requested = {
+        let mut pending = state.pending_resize.lock().unwrap();
+        pending.take()
+    };
+
+    if let Some((w, h)) = requested {
+        // Skip if the window is already at the requested size (avoids confusing
+        // the plugin with a redundant onSize call during initial attach).
+        if (w, h) == state.current_size {
+            return;
+        }
+
+        // Resize the host window
+        let _ = state.window.request_inner_size(PhysicalSize::new(w, h));
+
+        // Notify the plugin of the new size
+        let mut rect = ViewRect {
+            left: 0,
+            top: 0,
+            right: w as i32,
+            bottom: h as i32,
+        };
+        unsafe {
+            let result = state.plug_view.onSize(&mut rect);
+            if result != kResultOk {
+                debug!("IPlugView::onSize({w}x{h}) returned {result}");
+            }
+        }
+
+        state.current_size = (w, h);
+        debug!("Applied pending resize: {}x{}", w, h);
     }
 }
 
@@ -534,66 +464,6 @@ fn poll_x11_events(state: &mut EditorState) {
                                 "Plugin created child window {:08X} inside parent {:08X}",
                                 child_id, state.parent_window_id
                             );
-
-                            // #region agent log
-                            let map_state = match state.x11_conn.get_window_attributes(child_id) {
-                                Ok(cookie) => match cookie.reply() {
-                                    Ok(r) => format!("{:?}", r.map_state),
-                                    Err(e) => format!("reply_error: {}", e),
-                                },
-                                Err(e) => format!("conn_error: {}", e),
-                            };
-
-                            let xembed_info: Option<(u32, u32)> = match state.x11_conn.get_property(
-                                false,
-                                child_id,
-                                state.xembed_atoms._XEMBED_INFO,
-                                state.xembed_atoms._XEMBED_INFO,
-                                0,
-                                2,
-                            ) {
-                                Ok(cookie) => match cookie.reply() {
-                                    Ok(r) => {
-                                        if let Some(mut it) = r.value32() {
-                                            let version = it.next();
-                                            let flags = it.next();
-                                            match (version, flags) {
-                                                (Some(v), Some(f)) => Some((v, f)),
-                                                _ => None,
-                                            }
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                    Err(_) => None,
-                                },
-                                Err(_) => None,
-                            };
-
-                            agent_log(
-                                "pre-fix",
-                                "H10",
-                                "src/gui/window.rs:poll_x11_events",
-                                "CreateNotify under parent; inspecting map state + _XEMBED_INFO",
-                                serde_json::json!({
-                                    "parent_window_id_hex": format!("{:08X}", state.parent_window_id),
-                                    "child_window_id_hex": format!("{:08X}", child_id),
-                                    "prev_tracked_child_window_id_hex": prev_child.map(|w| format!("{:08X}", w)),
-                                    "now_tracked_child_window_id_hex": state.plugin_window_id.map(|w| format!("{:08X}", w)),
-                                    "create_x": create.x,
-                                    "create_y": create.y,
-                                    "create_width": create.width,
-                                    "create_height": create.height,
-                                    "override_redirect": create.override_redirect,
-                                    "child_map_state": map_state,
-                                    "xembed_info": xembed_info.map(|(version, flags)| serde_json::json!({
-                                        "version": version,
-                                        "flags": flags,
-                                        "flag_mapped": (flags & 1) != 0
-                                    })),
-                                }),
-                            );
-                            // #endregion
 
                             // Only do the initial XEmbed handshake for the first tracked child.
                             // If the plugin creates additional children later, we'll log them first
@@ -629,43 +499,24 @@ fn poll_x11_events(state: &mut EditorState) {
                         }
                     }
                     x11rb::protocol::Event::ConfigureNotify(cfg) => {
-                        // #region agent log
-                        if cfg.window == state.parent_window_id
-                            || state.plugin_window_id.is_some_and(|w| w == cfg.window)
+                        // If the plugin child starts drifting, force it back to origin.
+                        // Vital appears to emit ConfigureNotify with increasing x/y; keeping
+                        // the embedded child at (0,0) prevents duplicate/partially visible views.
+                        if state.plugin_window_id.is_some_and(|w| w == cfg.window)
+                            && (cfg.x != 0 || cfg.y != 0)
                         {
-                            agent_log(
-                                "pre-fix",
-                                "H10",
-                                "src/gui/window.rs:poll_x11_events",
-                                "ConfigureNotify (position/size change)",
-                                serde_json::json!({
-                                    "window_id_hex": format!("{:08X}", cfg.window),
-                                    "x": cfg.x,
-                                    "y": cfg.y,
-                                    "width": cfg.width,
-                                    "height": cfg.height,
-                                    "above_sibling": cfg.above_sibling,
-                                }),
-                            );
+                            if let Ok(cookie) = state.x11_conn.configure_window(
+                                cfg.window,
+                                &ConfigureWindowAux::new().x(0).y(0),
+                            ) {
+                                let _ = cookie.check();
+                            }
+                            let _ = state.x11_conn.flush();
                         }
-                        // #endregion
                     }
-                    x11rb::protocol::Event::MapNotify(map) => {
+                    x11rb::protocol::Event::MapNotify(_map) => {
                         // Child window mapped -- ensure it's visible
                         debug!("MapNotify received");
-                        if state.plugin_window_id.is_some_and(|w| w == map.window) {
-                            // #region agent log
-                            agent_log(
-                                "pre-fix",
-                                "H9",
-                                "src/gui/window.rs:poll_x11_events",
-                                "MapNotify for plugin child window",
-                                serde_json::json!({
-                                    "child_window_id_hex": format!("{:08X}", map.window),
-                                }),
-                            );
-                            // #endregion
-                        }
                     }
                     _ => {
                         // Ignore other X11 events
@@ -675,17 +526,6 @@ fn poll_x11_events(state: &mut EditorState) {
             Ok(None) => break, // No more events
             Err(e) => {
                 warn!("X11 poll_for_event error: {}", e);
-                // #region agent log
-                agent_log(
-                    "pre-fix",
-                    "H5",
-                    "src/gui/window.rs:poll_x11_events",
-                    "x11_conn.poll_for_event error",
-                    serde_json::json!({
-                        "error": e.to_string(),
-                    }),
-                );
-                // #endregion
                 break;
             }
         }
@@ -755,72 +595,36 @@ impl Drop for EditorState {
     }
 }
 
-/// Open the plugin's editor window (blocking).
+/// Open the plugin's editor window on the current thread.
 ///
 /// This function creates a winit event loop on the current thread and
 /// blocks until the editor window is closed. It should be called from
 /// a dedicated GUI thread (NOT the Tokio async runtime thread).
 ///
+/// The `opened_tx` channel is used to signal the caller as soon as the
+/// editor window is successfully created (or if creation fails), allowing
+/// the caller to return early without waiting for the window to close.
+///
 /// # Arguments
 /// * `plugin` - Arc<Mutex<Option<PluginInstance>>> shared with AudioHost
 /// * `plugin_name` - Human-readable plugin name for the window title
+/// * `opened_tx` - Sender to signal editor open success/failure
 ///
 /// # Returns
 /// Ok(()) when the window is closed normally, Err on failure.
 pub fn open_editor_window(
     plugin: Arc<Mutex<Option<PluginInstance>>>,
     plugin_name: String,
+    opened_tx: std::sync::mpsc::Sender<Result<(), String>>,
+    close_signal: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
     info!("Opening editor window for '{}'", plugin_name);
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H0",
-        "src/gui/window.rs:open_editor_window",
-        "open_editor_window entry",
-        serde_json::json!({
-            "plugin_name": plugin_name,
-            "wayland_display_set": std::env::var("WAYLAND_DISPLAY").is_ok(),
-            "x11_display": std::env::var("DISPLAY").ok(),
-            "winit_backend": std::env::var("WINIT_UNIX_BACKEND").ok(),
-        }),
-    );
-    // #endregion
 
     // Create shared run loop (used by both IPlugFrame and event loop)
     let runloop = Arc::new(HostRunLoop::new());
 
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H0",
-        "src/gui/window.rs:open_editor_window",
-        "HostRunLoop created; about to create EventLoop",
-        serde_json::json!({}),
-    );
-    // #endregion
-
     // Create winit event loop
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H6",
-        "src/gui/window.rs:open_editor_window",
-        "building winit EventLoop via EventLoopBuilder",
-        serde_json::json!({}),
-    );
-    // #endregion
     let mut builder = EventLoop::builder();
-
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H1",
-        "src/gui/window.rs:open_editor_window",
-        "forcing winit X11 backend (XEmbed requires X11)",
-        serde_json::json!({}),
-    );
-    // #endregion
 
     // On Linux, allow EventLoop creation off the main thread and force X11 so we can
     // obtain an X11 window ID for `X11EmbedWindowID`.
@@ -834,55 +638,16 @@ pub fn open_editor_window(
         .build()
         .map_err(|e| format!("Failed to create event loop: {}", e))?;
 
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H0",
-        "src/gui/window.rs:open_editor_window",
-        "EventLoopBuilder::build Ok",
-        serde_json::json!({}),
-    );
-    // #endregion
-
     // Set control flow: poll continuously for timer/FD dispatch
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H0",
-        "src/gui/window.rs:open_editor_window",
-        "set_control_flow(ControlFlow::Poll) applied",
-        serde_json::json!({}),
-    );
-    // #endregion
+    // Create application handler with the opened signal channel and close handle
+    let mut app = EditorApp::new(plugin, plugin_name, runloop, opened_tx, close_signal);
 
-    // Create application handler
-    let mut app = EditorApp::new(plugin, plugin_name, runloop);
-
-    // Run the event loop (blocks until window closes)
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H0",
-        "src/gui/window.rs:open_editor_window",
-        "about to run_app (enter event loop)",
-        serde_json::json!({}),
-    );
-    // #endregion
+    // Run the event loop (blocks until window closes or close_signal is set)
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("Event loop error: {}", e))?;
-
-    // #region agent log
-    agent_log(
-        "pre-fix",
-        "H0",
-        "src/gui/window.rs:open_editor_window",
-        "run_app returned Ok",
-        serde_json::json!({}),
-    );
-    // #endregion
 
     info!("Editor window closed");
     Ok(())

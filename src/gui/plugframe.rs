@@ -9,8 +9,7 @@
 //! also respond to IRunLoop queries, we implement a combined struct that
 //! lists both interfaces.
 
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
 
 use tracing::debug;
 use vst3::com_scrape_types::ComWrapper;
@@ -21,37 +20,8 @@ use vst3::Steinberg::{
 
 use super::runloop::HostRunLoop;
 
-// #region agent log
-fn agent_log(
-    run_id: &str,
-    hypothesis_id: &str,
-    location: &str,
-    message: &str,
-    data: serde_json::Value,
-) {
-    use std::io::Write;
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let payload = serde_json::json!({
-        "id": format!("log_{}_{}", std::process::id(), ts),
-        "timestamp": ts,
-        "location": location,
-        "message": message,
-        "data": data,
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-    });
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/home/josh/Developer/vst3-mcp/.cursor/debug.log")
-    {
-        let _ = writeln!(f, "{}", payload);
-    }
-}
-// #endregion
+/// Pending resize request from the plugin (width, height in physical pixels).
+pub type PendingResize = Arc<Mutex<Option<(u32, u32)>>>;
 
 /// Combined IPlugFrame + IRunLoop COM object.
 ///
@@ -61,18 +31,25 @@ fn agent_log(
 /// vtable for IRunLoop queries.
 pub struct PlugFrame {
     /// Shared reference to the run loop for timer/FD dispatch.
-    /// Kept as Arc so the event loop can also access it.
     _runloop_ref: Arc<HostRunLoop>,
+    /// Shared slot where resizeView deposits the requested size.
+    /// The event loop picks it up and performs the actual resize + onSize.
+    pending_resize: PendingResize,
 }
 
 impl PlugFrame {
     /// Create a new PlugFrame with an associated HostRunLoop.
     ///
-    /// The `runloop` Arc is shared with the event loop so both the plugin
-    /// (via IRunLoop) and the host (via dispatch methods) can access it.
-    pub fn new(runloop: Arc<HostRunLoop>) -> ComWrapper<Self> {
+    /// `pending_resize` is shared with the event loop so that resizeView
+    /// can signal a resize request without directly touching the window
+    /// or the IPlugView (avoiding feedback loops).
+    pub fn new(
+        runloop: Arc<HostRunLoop>,
+        pending_resize: PendingResize,
+    ) -> ComWrapper<Self> {
         ComWrapper::new(PlugFrame {
             _runloop_ref: runloop,
+            pending_resize,
         })
     }
 }
@@ -87,29 +64,21 @@ impl IPlugFrameTrait for PlugFrame {
         _view: *mut IPlugView,
         new_size: *mut ViewRect,
     ) -> tresult {
-        if !new_size.is_null() {
-            let rect = unsafe { &*new_size };
-            let w = rect.right - rect.left;
-            let h = rect.bottom - rect.top;
-            debug!("IPlugFrame::resizeView requested: {}x{}", w, h);
-            // #region agent log
-            agent_log(
-                "pre-fix",
-                "H11",
-                "src/gui/plugframe.rs:PlugFrame::resizeView",
-                "plugin requested resize via IPlugFrame::resizeView",
-                serde_json::json!({
-                    "w": w,
-                    "h": h,
-                    "left": rect.left,
-                    "top": rect.top,
-                    "right": rect.right,
-                    "bottom": rect.bottom,
-                }),
-            );
-            // #endregion
+        if new_size.is_null() {
+            return kResultOk;
         }
-        // Accept all resize requests for now (fixed-size window in Phase 04.1)
+
+        let rect = unsafe { &*new_size };
+        let w = (rect.right - rect.left).max(1) as u32;
+        let h = (rect.bottom - rect.top).max(1) as u32;
+        debug!("IPlugFrame::resizeView requested: {}x{}", w, h);
+
+        // Store the requested size; the event loop will resize the window
+        // and call IPlugView::onSize() in about_to_wait.
+        if let Ok(mut pending) = self.pending_resize.lock() {
+            *pending = Some((w, h));
+        }
+
         kResultOk
     }
 }

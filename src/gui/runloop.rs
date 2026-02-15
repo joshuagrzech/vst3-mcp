@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -40,42 +39,6 @@ pub struct HostRunLoop {
     timers: Mutex<Vec<TimerEntry>>,
 }
 
-// #region agent log
-fn agent_log(
-    run_id: &str,
-    hypothesis_id: &str,
-    location: &str,
-    message: &str,
-    data: serde_json::Value,
-) {
-    use std::io::Write;
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let payload = serde_json::json!({
-        "id": format!("log_{}_{}", std::process::id(), ts),
-        "timestamp": ts,
-        "location": location,
-        "message": message,
-        "data": data,
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-    });
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/home/josh/Developer/vst3-mcp/.cursor/debug.log")
-    {
-        let _ = writeln!(f, "{}", payload);
-    }
-}
-// #endregion
-
-static REGISTER_FD_LOGS: AtomicUsize = AtomicUsize::new(0);
-static REGISTER_TIMER_LOGS: AtomicUsize = AtomicUsize::new(0);
-static DISPATCH_FD_LOGS: AtomicUsize = AtomicUsize::new(0);
-
 // Safety: HostRunLoop is accessed behind a Mutex in practice (via Arc).
 // The raw pointers inside are COM pointers that are AddRef'd on registration
 // and only accessed from the GUI thread.
@@ -101,19 +64,6 @@ impl HostRunLoop {
 
     /// Called from event loop when FDs are ready.
     pub fn dispatch_ready_fds(&self, ready_fds: &[RawFd]) {
-        if !ready_fds.is_empty() && DISPATCH_FD_LOGS.fetch_add(1, Ordering::Relaxed) < 3 {
-            // #region agent log
-            agent_log(
-                "pre-fix",
-                "H8",
-                "src/gui/runloop.rs:HostRunLoop::dispatch_ready_fds",
-                "dispatching ready fds",
-                serde_json::json!({
-                    "ready_fds": ready_fds,
-                }),
-            );
-            // #endregion
-        }
         let handlers = self.event_handlers.lock().unwrap();
         for &fd in ready_fds {
             if let Some(&handler) = handlers.get(&fd) {
@@ -171,20 +121,6 @@ impl IRunLoopTrait for HostRunLoop {
 
         self.event_handlers.lock().unwrap().insert(fd as RawFd, handler);
         debug!("IRunLoop: registered event handler for FD {}", fd);
-        if REGISTER_FD_LOGS.fetch_add(1, Ordering::Relaxed) < 5 {
-            // #region agent log
-            agent_log(
-                "pre-fix",
-                "H8",
-                "src/gui/runloop.rs:HostRunLoop::registerEventHandler",
-                "registered fd event handler",
-                serde_json::json!({
-                    "fd": fd,
-                    "handler_ptr": format!("{:p}", handler),
-                }),
-            );
-            // #endregion
-        }
         kResultOk
     }
 
@@ -234,20 +170,6 @@ impl IRunLoopTrait for HostRunLoop {
             "IRunLoop: registered timer with interval {}ms",
             milliseconds
         );
-        if REGISTER_TIMER_LOGS.fetch_add(1, Ordering::Relaxed) < 5 {
-            // #region agent log
-            agent_log(
-                "pre-fix",
-                "H8",
-                "src/gui/runloop.rs:HostRunLoop::registerTimer",
-                "registered timer handler",
-                serde_json::json!({
-                    "interval_ms": milliseconds,
-                    "handler_ptr": format!("{:p}", handler),
-                }),
-            );
-            // #endregion
-        }
         kResultOk
     }
 
