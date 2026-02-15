@@ -13,6 +13,7 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 use tracing::{debug, info};
 
 use vst3_mcp_host::audio;
+use vst3_mcp_host::gui;
 use vst3_mcp_host::hosting::host_app::{ComponentHandler, HostApp};
 use vst3_mcp_host::hosting::module::VstModule;
 use vst3_mcp_host::hosting::plugin::PluginInstance;
@@ -565,6 +566,67 @@ impl AudioHost {
 
         info!("Batch queued {} parameter changes", req.changes.len());
         Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(description = "Open the plugin's graphical editor window. Blocks until the window is closed by the user. Call load_plugin first.")]
+    fn open_editor(&self) -> Result<String, String> {
+        info!("open_editor called");
+
+        // Verify a plugin is loaded and get the name
+        let plugin_name = {
+            let plugin_guard = self
+                .plugin
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
+
+            if plugin_guard.is_none() {
+                return Err("No plugin loaded. Call load_plugin first.".to_string());
+            }
+
+            // Get plugin name for window title
+            let info_guard = self
+                .plugin_info
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
+            info_guard
+                .as_ref()
+                .map(|i| i.name.clone())
+                .unwrap_or_else(|| "Unknown Plugin".to_string())
+        };
+
+        // Clone Arc references for the GUI thread
+        let plugin_arc = Arc::clone(&self.plugin);
+
+        // Channel to signal window close
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Spawn dedicated GUI thread (winit event loop is blocking
+        // and incompatible with Tokio's async runtime)
+        std::thread::spawn(move || {
+            match gui::open_editor_window(plugin_arc, plugin_name) {
+                Ok(()) => {
+                    info!("Editor window closed normally");
+                    let _ = tx.send(Ok(()));
+                }
+                Err(e) => {
+                    tracing::error!("Editor window failed: {}", e);
+                    let _ = tx.send(Err(format!("Editor error: {}", e)));
+                }
+            }
+        });
+
+        // Block until window closes
+        let result = rx
+            .recv()
+            .map_err(|_| "GUI thread panicked or disconnected".to_string())?;
+
+        result.map(|()| {
+            let response = serde_json::json!({
+                "status": "closed",
+                "message": "Editor window closed",
+            });
+            serde_json::to_string_pretty(&response).unwrap()
+        })
     }
 }
 
