@@ -19,17 +19,17 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Hosting
 
-- [ ] **HOST-01**: Worker process safely loads VST3 SDK (vst3-sys) and plugins ⚠️ **HYPOTHESIS:** coupler-rs/vst3 maturity unknown, SDK 3.8.0 compat needs verification
+- [ ] **HOST-01**: Worker process safely loads VST3 SDK (vst3-sys) and plugins -- **HYPOTHESIS:** coupler-rs/vst3 maturity unknown, SDK 3.8.0 compat needs verification
 
 ### Processing
 
-- [ ] **PROC-01**: Offline audio processing pipeline (file in → VST process → file out)
+- [ ] **PROC-01**: Offline audio processing pipeline (file in -> VST process -> file out)
 - [ ] **PROC-02**: Transparent audio quality (preserve sample rate, bit depth, plugin native characteristics)
 
 ### Parameters
 
-- [ ] **PARAM-01**: Dynamic schema generation (scan plugin parameters at runtime → MCP tool JSON schema) ⚠️ **HYPOTHESIS:** Novel approach, no precedent found
-- [ ] **PARAM-02**: Focus mode ("wiggle") - list_parameters accepts .vstpreset mask, exposes only params that differ from default ⚠️ **HYPOTHESIS:** Novel AI-specific feature, IUnitInfo adoption rate unknown
+- [ ] **PARAM-01**: Dynamic schema generation (scan plugin parameters at runtime -> MCP tool JSON schema) -- **HYPOTHESIS:** Novel approach, no precedent found
+- [ ] **PARAM-02**: Focus mode ("wiggle") - list_parameters accepts .vstpreset mask, exposes only params that differ from default -- **HYPOTHESIS:** Novel AI-specific feature, IUnitInfo adoption rate unknown
 
 ### Presets
 
@@ -38,7 +38,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Integration
 
 - [ ] **INTEG-01**: MCP integration over stdio (Claude can call tools, get results)
-- [ ] **INTEG-02**: Demo conversation works end-to-end ("brighten this vocal" → success without manual intervention) ⚠️ **HYPOTHESIS:** Full system validation target
+- [ ] **INTEG-02**: Demo conversation works end-to-end ("brighten this vocal" -> success without manual intervention) -- **HYPOTHESIS:** Full system validation target
 
 ## v2 Requirements
 
@@ -66,10 +66,10 @@ Explicitly excluded. Documented to prevent scope creep.
 
 | Feature | Reason |
 |---------|--------|
-| Real-time processing or live audio streams | All rendering is offline (batched) — real-time adds latency/buffer complexity not needed for interactive experimentation workflow |
-| Plugin GUIs or editors | Headless only — no UI windows, parameter control is purely API-driven |
-| VST2 support | VST3 only for v1 — VST2 is legacy, VST3 SDK is now MIT licensed |
-| DAW features (timeline, tracks, mixing) | Single-plugin processor, not a full DAW — use existing DAWs for complex workflows |
+| Real-time processing or live audio streams | All rendering is offline (batched) -- real-time adds latency/buffer complexity not needed for interactive experimentation workflow |
+| Plugin GUIs or editors | Headless only -- no UI windows, parameter control is purely API-driven |
+| VST2 support | VST3 only for v1 -- VST2 is legacy, VST3 SDK is now MIT licensed |
+| DAW features (timeline, tracks, mixing) | Single-plugin processor, not a full DAW -- use existing DAWs for complex workflows |
 
 ## Traceability
 
@@ -77,24 +77,24 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| ARCH-01 | TBD | Pending |
-| ARCH-02 | TBD | Pending |
-| DISC-01 | TBD | Pending |
-| DISC-02 | TBD | Pending |
-| HOST-01 | TBD | Pending |
-| PROC-01 | TBD | Pending |
-| PROC-02 | TBD | Pending |
-| PARAM-01 | TBD | Pending |
-| PARAM-02 | TBD | Pending |
-| PRES-01 | TBD | Pending |
-| INTEG-01 | TBD | Pending |
-| INTEG-02 | TBD | Pending |
+| HOST-01 | Phase 1: Single-Plugin MVP | Pending |
+| DISC-01 | Phase 1: Single-Plugin MVP | Pending |
+| PROC-01 | Phase 1: Single-Plugin MVP | Pending |
+| PROC-02 | Phase 1: Single-Plugin MVP | Pending |
+| PRES-01 | Phase 1: Single-Plugin MVP | Pending |
+| INTEG-01 | Phase 1: Single-Plugin MVP | Pending |
+| ARCH-01 | Phase 2: Crash Isolation | Pending |
+| ARCH-02 | Phase 2: Crash Isolation | Pending |
+| DISC-02 | Phase 2: Crash Isolation | Pending |
+| PARAM-01 | Phase 3: AI Parameter Intelligence | Pending |
+| PARAM-02 | Phase 3: AI Parameter Intelligence | Pending |
+| INTEG-02 | Phase 4: System Validation | Pending |
 
 **Coverage:**
 - v1 requirements: 12 total
-- Mapped to phases: 0 (roadmap not yet created)
-- Unmapped: 12 ⚠️
+- Mapped to phases: 12
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-14*
-*Last updated: 2026-02-14 after initial definition*
+*Last updated: 2026-02-15 after roadmap creation*
