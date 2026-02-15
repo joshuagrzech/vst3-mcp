@@ -65,6 +65,36 @@ pub struct ParamInfo {
     pub flags: u32,
 }
 
+impl ParamInfo {
+    /// Check if this parameter can be written by the host.
+    ///
+    /// A writable parameter must have kCanAutomate flag AND NOT have kIsReadOnly flag.
+    pub fn is_writable(&self) -> bool {
+        const K_CAN_AUTOMATE: u32 = 1 << 0;
+        const K_IS_READ_ONLY: u32 = 1 << 1;
+
+        (self.flags & K_CAN_AUTOMATE != 0) && (self.flags & K_IS_READ_ONLY == 0)
+    }
+
+    /// Check if this parameter should be hidden from UI.
+    pub fn is_hidden(&self) -> bool {
+        const K_IS_HIDDEN: u32 = 1 << 5;
+        self.flags & K_IS_HIDDEN != 0
+    }
+
+    /// Check if this is a bypass parameter.
+    pub fn is_bypass(&self) -> bool {
+        const K_IS_BYPASS: u32 = 1 << 4;
+        self.flags & K_IS_BYPASS != 0
+    }
+
+    /// Check if this parameter is read-only.
+    pub fn is_read_only(&self) -> bool {
+        const K_IS_READ_ONLY: u32 = 1 << 1;
+        self.flags & K_IS_READ_ONLY != 0
+    }
+}
+
 /// Plugin lifecycle state.
 ///
 /// VST3 plugins must transition through these states in order:
