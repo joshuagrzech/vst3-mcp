@@ -98,17 +98,44 @@ Explicitly excluded to prevent scope creep.
 
 ## Traceability
 
-Populated during roadmap creation.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| | | Pending |
+| HOST-01 | Phase 1 | Pending |
+| HOST-02 | Phase 1 | Pending |
+| HOST-03 | Phase 1 | Pending |
+| HOST-04 | Phase 1 | Pending |
+| HOST-05 | Phase 1 | Pending |
+| AUDIO-01 | Phase 2 | Pending |
+| AUDIO-02 | Phase 2 | Pending |
+| AUDIO-03 | Phase 2 | Pending |
+| AUDIO-04 | Phase 2 | Pending |
+| AUDIO-05 | Phase 2 | Pending |
+| PARAM-01 | Phase 3 | Pending |
+| PARAM-02 | Phase 3 | Pending |
+| PARAM-03 | Phase 3 | Pending |
+| PARAM-04 | Phase 3 | Pending |
+| PARAM-05 | Phase 3 | Pending |
+| PARAM-06 | Phase 3 | Pending |
+| MCP-01 | Phase 4 | Pending |
+| MCP-02 | Phase 4 | Pending |
+| MCP-03 | Phase 4 | Pending |
+| MCP-04 | Phase 4 | Pending |
+| MCP-05 | Phase 4 | Pending |
+| MCP-06 | Phase 4 | Pending |
+| MCP-07 | Phase 4 | Pending |
+| FOCUS-01 | Phase 5 | Pending |
+| FOCUS-02 | Phase 5 | Pending |
+| FOCUS-03 | Phase 5 | Pending |
+| FOCUS-04 | Phase 5 | Pending |
+| STATE-01 | Phase 6 | Pending |
+| STATE-02 | Phase 6 | Pending |
+| STATE-03 | Phase 6 | Pending |
 
 **Coverage:**
-- v1 requirements: 0 total (to be counted after final review)
-- Mapped to phases: 0
+- v1 requirements: 30 total
+- Mapped to phases: 30
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-15*
-*Last updated: 2026-02-15 after research-based minimal MVP scoping*
+*Last updated: 2026-02-15 -- traceability populated during roadmap creation*
