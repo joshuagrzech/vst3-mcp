@@ -10,6 +10,31 @@ use crate::audio::buffers;
 use crate::audio::decode::DecodedAudio;
 use crate::hosting::plugin::PluginInstance;
 
+/// Set FTZ (Flush-To-Zero) and DAZ (Denormals-Are-Zero) flags in MXCSR.
+/// Returns the previous MXCSR value for later restoration.
+#[cfg(target_arch = "x86_64")]
+unsafe fn set_ftz_daz() -> u32 {
+    // Safety: reading and writing MXCSR is safe on x86_64 and only affects
+    // the current thread's floating-point behavior.
+    let mut old: u32 = 0;
+    unsafe {
+        std::arch::asm!("stmxcsr [{}]", in(reg) &mut old, options(nostack));
+    }
+    let new = old | (1 << 15) | (1 << 6); // FTZ = bit 15, DAZ = bit 6
+    unsafe {
+        std::arch::asm!("ldmxcsr [{}]", in(reg) &new, options(nostack));
+    }
+    old
+}
+
+/// Restore the MXCSR register to a previously saved value.
+#[cfg(target_arch = "x86_64")]
+unsafe fn restore_mxcsr(old: u32) {
+    unsafe {
+        std::arch::asm!("ldmxcsr [{}]", in(reg) &old, options(nostack));
+    }
+}
+
 /// Default block size for processing if not specified by the plugin.
 const DEFAULT_BLOCK_SIZE: usize = 4096;
 
@@ -62,57 +87,72 @@ pub fn render_offline(plugin: &mut PluginInstance, decoded: &DecodedAudio) -> Re
     // Pre-allocate silence buffer for tail processing
     let silence: Vec<f32> = vec![0.0f32; max_block_size];
 
-    // 5. Process input audio in blocks
-    let mut offset = 0;
-    while offset < total_frames {
-        let block_size = (total_frames - offset).min(max_block_size);
+    // Enable denormal flushing (FTZ+DAZ) for the entire processing section
+    #[cfg(target_arch = "x86_64")]
+    let old_mxcsr = unsafe { set_ftz_daz() };
 
-        // Build per-channel input slices
-        let input_slices: Vec<&[f32]> = input_planar
-            .iter()
-            .map(|ch| &ch[offset..offset + block_size])
-            .collect();
+    // Wrap processing in a closure to ensure MXCSR is restored even on error
+    let result = (|| -> Result<()> {
+        // 5. Process input audio in blocks
+        let mut offset = 0;
+        while offset < total_frames {
+            let block_size = (total_frames - offset).min(max_block_size);
 
-        // Build per-channel output slices
-        let mut output_vecs: Vec<&mut [f32]> = output_planar
-            .iter_mut()
-            .map(|ch| &mut ch[offset..offset + block_size])
-            .collect();
-
-        plugin
-            .process(&input_slices, &mut output_vecs, block_size as i32)
-            .with_context(|| format!("plugin process failed at frame offset {}", offset))?;
-
-        offset += block_size;
-    }
-
-    // 6. Process tail (feed silence to capture reverb/delay fade-out)
-    if tail_frames > 0 {
-        let mut tail_offset = 0;
-        while tail_offset < tail_frames {
-            let block_size = (tail_frames - tail_offset).min(max_block_size);
-            let output_offset = total_frames + tail_offset;
-
-            // Build per-channel silence input slices
-            let input_slices: Vec<&[f32]> = (0..channels)
-                .map(|_| &silence[..block_size])
+            // Build per-channel input slices
+            let input_slices: Vec<&[f32]> = input_planar
+                .iter()
+                .map(|ch| &ch[offset..offset + block_size])
                 .collect();
 
-            // Build per-channel output slices into the tail region
+            // Build per-channel output slices
             let mut output_vecs: Vec<&mut [f32]> = output_planar
                 .iter_mut()
-                .map(|ch| &mut ch[output_offset..output_offset + block_size])
+                .map(|ch| &mut ch[offset..offset + block_size])
                 .collect();
 
             plugin
                 .process(&input_slices, &mut output_vecs, block_size as i32)
-                .with_context(|| {
-                    format!("plugin process failed during tail at offset {}", tail_offset)
-                })?;
+                .with_context(|| format!("plugin process failed at frame offset {}", offset))?;
 
-            tail_offset += block_size;
+            offset += block_size;
         }
-    }
+
+        // 6. Process tail (feed silence to capture reverb/delay fade-out)
+        if tail_frames > 0 {
+            let mut tail_offset = 0;
+            while tail_offset < tail_frames {
+                let block_size = (tail_frames - tail_offset).min(max_block_size);
+                let output_offset = total_frames + tail_offset;
+
+                // Build per-channel silence input slices
+                let input_slices: Vec<&[f32]> = (0..channels)
+                    .map(|_| &silence[..block_size])
+                    .collect();
+
+                // Build per-channel output slices into the tail region
+                let mut output_vecs: Vec<&mut [f32]> = output_planar
+                    .iter_mut()
+                    .map(|ch| &mut ch[output_offset..output_offset + block_size])
+                    .collect();
+
+                plugin
+                    .process(&input_slices, &mut output_vecs, block_size as i32)
+                    .with_context(|| {
+                        format!("plugin process failed during tail at offset {}", tail_offset)
+                    })?;
+
+                tail_offset += block_size;
+            }
+        }
+
+        Ok(())
+    })();
+
+    // Restore MXCSR before propagating any error
+    #[cfg(target_arch = "x86_64")]
+    unsafe { restore_mxcsr(old_mxcsr); }
+
+    result?;
 
     // 7. Interleave output channels
     let interleaved = buffers::interleave(&output_planar);

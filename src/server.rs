@@ -255,11 +255,13 @@ impl AudioHost {
         // Re-setup plugin if sample rate differs from current setup
         // (This handles the case where plugin was set up at default 44100
         // but input file is 48000, etc.)
-        // We attempt re-setup; if it fails (e.g., plugin doesn't support it),
-        // we continue with the current setup.
-        if let Err(e) = plugin.re_setup(decoded.sample_rate as f64, 4096) {
-            debug!("re_setup with input sample rate failed (continuing with current): {}", e);
-        }
+        // Sample rate mismatch is a hard error -- processing at the wrong rate
+        // produces incorrect output (pitch shift, wrong time-based effects).
+        plugin.re_setup(decoded.sample_rate as f64, 4096)
+            .map_err(|e| format!(
+                "Plugin does not support sample rate {} Hz: {}",
+                decoded.sample_rate, e
+            ))?;
 
         // Render through plugin
         let output_samples = audio::process::render_offline(plugin, &decoded)
