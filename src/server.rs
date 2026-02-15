@@ -63,6 +63,40 @@ pub struct LoadPresetRequest {
     pub path: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetParamRequest {
+    /// Parameter ID from list_params.
+    #[schemars(description = "Parameter ID from list_params")]
+    pub id: u32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SetParamRequest {
+    /// Parameter ID from list_params.
+    #[schemars(description = "Parameter ID from list_params")]
+    pub id: u32,
+    /// Normalized parameter value (must be in range [0.0, 1.0]).
+    #[schemars(description = "Normalized parameter value (must be in range [0.0, 1.0])")]
+    pub value: f64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ParamChange {
+    /// Parameter ID.
+    #[schemars(description = "Parameter ID")]
+    pub id: u32,
+    /// Normalized parameter value (must be in range [0.0, 1.0]).
+    #[schemars(description = "Normalized parameter value (must be in range [0.0, 1.0])")]
+    pub value: f64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BatchSetRequest {
+    /// List of parameter changes to apply atomically.
+    #[schemars(description = "List of parameter changes to apply atomically")]
+    pub changes: Vec<ParamChange>,
+}
+
 // -- AudioHost MCP server --
 
 /// MCP server that hosts VST3 plugins for audio processing.
@@ -353,6 +387,183 @@ impl AudioHost {
         });
 
         info!("Preset loaded: {}", req.path);
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(description = "Get the loaded plugin's identity (classId, name, vendor). Call load_plugin first.")]
+    fn get_plugin_info(&self) -> Result<String, String> {
+        info!("get_plugin_info called");
+
+        let info_guard = self
+            .plugin_info
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+
+        let info = info_guard
+            .as_ref()
+            .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+
+        let response = serde_json::json!({
+            "classId": info.uid,
+            "name": info.name,
+            "vendor": info.vendor,
+        });
+
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(description = "List all writable parameters with current values. Returns parameter ID, name, value, and display string for each. Call load_plugin first.")]
+    fn list_params(&self) -> Result<String, String> {
+        info!("list_params called");
+
+        let plugin_guard = self
+            .plugin
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+
+        let plugin = plugin_guard
+            .as_ref()
+            .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+
+        let count = plugin.get_parameter_count();
+        let mut parameters = Vec::new();
+
+        for i in 0..count {
+            if let Ok(info) = plugin.get_parameter_info(i) {
+                // Only include writable, non-hidden parameters
+                if info.is_writable() && !info.is_hidden() {
+                    let value = plugin.get_parameter(info.id);
+                    let display = plugin
+                        .get_parameter_display(info.id)
+                        .unwrap_or_else(|_| format!("{:.3}", value));
+
+                    parameters.push(serde_json::json!({
+                        "id": info.id,
+                        "name": info.title,
+                        "value": value,
+                        "display": display,
+                    }));
+                }
+            }
+        }
+
+        let response = serde_json::json!({
+            "parameters": parameters,
+            "count": parameters.len(),
+        });
+
+        info!("list_params found {} writable parameters", parameters.len());
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(description = "Get a single parameter's current value and display string. Call load_plugin first.")]
+    fn get_param(
+        &self,
+        Parameters(req): Parameters<GetParamRequest>,
+    ) -> Result<String, String> {
+        info!("get_param called for id: {}", req.id);
+
+        let plugin_guard = self
+            .plugin
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+
+        let plugin = plugin_guard
+            .as_ref()
+            .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+
+        let value = plugin.get_parameter(req.id);
+        let display = plugin
+            .get_parameter_display(req.id)
+            .unwrap_or_else(|_| format!("{:.3}", value));
+
+        let response = serde_json::json!({
+            "id": req.id,
+            "value": value,
+            "display": display,
+        });
+
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(description = "Set a parameter value. Changes are queued and applied in next process_audio call. Value must be in range [0.0, 1.0]. Call load_plugin first.")]
+    fn set_param(
+        &self,
+        Parameters(req): Parameters<SetParamRequest>,
+    ) -> Result<String, String> {
+        info!("set_param called: id={}, value={}", req.id, req.value);
+
+        // Validate value range
+        if req.value < 0.0 || req.value > 1.0 {
+            return Err(format!(
+                "Invalid parameter value: {}. Must be in range [0.0, 1.0]",
+                req.value
+            ));
+        }
+
+        let mut plugin_guard = self
+            .plugin
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+
+        let plugin = plugin_guard
+            .as_mut()
+            .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+
+        plugin.queue_parameter_change(req.id, req.value);
+
+        let display_str = plugin
+            .get_parameter_display(req.id)
+            .unwrap_or_else(|_| format!("{:.3}", req.value));
+
+        let response = serde_json::json!({
+            "status": "queued",
+            "id": req.id,
+            "value": req.value,
+            "display": display_str,
+        });
+
+        info!("Parameter {} queued: {} ({})", req.id, req.value, display_str);
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(description = "Set multiple parameters atomically. All values must be in range [0.0, 1.0]. Changes are queued and applied in next process_audio call. Call load_plugin first.")]
+    fn batch_set(
+        &self,
+        Parameters(req): Parameters<BatchSetRequest>,
+    ) -> Result<String, String> {
+        info!("batch_set called with {} changes", req.changes.len());
+
+        // Validate all changes first
+        for change in &req.changes {
+            if change.value < 0.0 || change.value > 1.0 {
+                return Err(format!(
+                    "Invalid parameter value for id {}: {}. Must be in range [0.0, 1.0]",
+                    change.id, change.value
+                ));
+            }
+        }
+
+        let mut plugin_guard = self
+            .plugin
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+
+        let plugin = plugin_guard
+            .as_mut()
+            .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+
+        // Queue all changes
+        for change in &req.changes {
+            plugin.queue_parameter_change(change.id, change.value);
+        }
+
+        let response = serde_json::json!({
+            "status": "queued",
+            "changes_queued": req.changes.len(),
+        });
+
+        info!("Batch queued {} parameter changes", req.changes.len());
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 }
