@@ -30,11 +30,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. An MCP client can load a plugin, send an audio file, and receive a processed output file
   4. Output audio preserves the input sample rate and bit depth (no quality degradation from the host)
   5. An MCP client can save and load .vstpreset files for a loaded plugin
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 01-01: VST3 hosting core (coupler-rs bindings, plugin lifecycle, COM RAII wrappers)
-- [ ] 01-02: Audio pipeline and MCP integration (symphonia/hound I/O, block processing, rmcp server, tool definitions)
+- [ ] 01-01-PLAN.md -- VST3 hosting core: project setup, module loading, plugin scanner, lifecycle state machine, COM RAII wrappers, preset I/O
+- [ ] 01-02-PLAN.md -- Audio pipeline and MCP integration: symphonia/hound I/O, block processing, buffer conversion, rmcp server, tool definitions
 
 ### Phase 2: Crash Isolation
 **Goal**: Plugin crashes are contained in worker processes, keeping the MCP server alive and automatically avoiding known-bad plugins
