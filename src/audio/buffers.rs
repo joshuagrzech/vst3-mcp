@@ -35,13 +35,12 @@ pub fn interleave(planar: &[Vec<f32>]) -> Vec<f32> {
         return Vec::new();
     }
 
-    let channels = planar.len();
     let total_frames = planar[0].len();
-    let mut interleaved = Vec::with_capacity(total_frames * channels);
+    let mut interleaved = Vec::with_capacity(total_frames * planar.len());
 
     for frame in 0..total_frames {
-        for ch in 0..channels {
-            interleaved.push(planar[ch][frame]);
+        for channel in planar {
+            interleaved.push(channel[frame]);
         }
     }
 
