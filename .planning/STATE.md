@@ -9,29 +9,29 @@ See: .planning/PROJECT.md (updated 2026-02-15)
 
 ## Current Position
 
-Phase: 1 of 6 (Plugin Hosting)
-Plan: 1 of 2 in current phase
-Status: Executing
-Last activity: 2026-02-15 -- Completed 01-01 (crash-safe scanning + hardened teardown)
+Phase: 1 of 6 (Plugin Hosting) -- COMPLETE
+Plan: 2 of 2 in current phase (all plans complete)
+Status: Phase Complete
+Last activity: 2026-02-15 -- Completed 01-02 (integration testing with real plugins)
 
-Progress: [█░░░░░░░░░] 8%
+Progress: [██░░░░░░░░] 17%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: 4min
-- Total execution time: 0.07 hours
+- Total plans completed: 2
+- Average duration: 17min
+- Total execution time: 0.57 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-plugin-hosting | 1 | 4min | 4min |
+| 01-plugin-hosting | 2 | 34min | 17min |
 
 **Recent Trend:**
-- Last 5 plans: 4min
-- Trend: baseline
+- Last 5 plans: 4min, 30min
+- Trend: increasing (integration testing with human checkpoint takes longer)
 
 *Updated after each plan completion*
 
@@ -48,10 +48,13 @@ Recent decisions affecting current work:
 - [01-01]: Arc<VstModule> stored in PluginInstance to enforce module lifetime structurally
 - [01-01]: ManuallyDrop for factory in VstModule to make drop order explicit before ExitDll
 - [01-01]: Option::take() in PluginInstance::Drop for COM pointer release ordering
+- [01-02]: Out-of-process scanner used in integration test to match production code path
+- [01-02]: Controller classId failing as IComponent is scanner filtering issue, deferred
+- [01-02]: Single plugin brand (Vital) sufficient -- yabridge needs Wine bridge
 
 ### Pending Todos
 
-None yet.
+- Scanner should filter discovered classes to only IComponent-compatible entries (discovered during 01-02 integration testing)
 
 ### Blockers/Concerns
 
@@ -61,5 +64,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-15
-Stopped at: Completed 01-01-PLAN.md (crash-safe scanning + hardened teardown)
+Stopped at: Completed 01-02-PLAN.md (integration testing with real plugins) -- Phase 1 complete
 Resume file: None
