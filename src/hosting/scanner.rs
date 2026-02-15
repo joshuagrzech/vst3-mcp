@@ -2,6 +2,8 @@
 //! and extract metadata (name, vendor, UID, category, version).
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use tracing::{debug, warn};
 use vst3::Steinberg::kResultOk;
@@ -71,6 +73,218 @@ pub fn scan_plugins(custom_path: Option<&str>) -> Result<Vec<PluginInfo>, HostEr
     }
 
     Ok(plugins)
+}
+
+/// Scan for VST3 plugins with optional out-of-process crash isolation.
+///
+/// When `scanner_binary` is provided, the slow path (binary loading) runs
+/// in a separate child process. If the child crashes, the host survives and
+/// reports the failure. The fast path (moduleinfo.json) always runs in-process
+/// since it is just file I/O with zero crash risk.
+///
+/// When `scanner_binary` is None, falls back to fully in-process scanning
+/// (same behavior as `scan_plugins`).
+pub fn scan_plugins_safe(
+    custom_path: Option<&str>,
+    scanner_binary: Option<&Path>,
+) -> Result<Vec<PluginInfo>, HostError> {
+    let paths = match custom_path {
+        Some(p) => vec![PathBuf::from(p)],
+        None => default_scan_paths(),
+    };
+
+    let mut plugins = Vec::new();
+
+    for scan_path in &paths {
+        if !scan_path.exists() {
+            debug!("scan path does not exist, skipping: {}", scan_path.display());
+            continue;
+        }
+
+        debug!("scanning for plugins in: {}", scan_path.display());
+        match scanner_binary {
+            Some(binary) => scan_directory_safe(scan_path, &mut plugins, binary),
+            None => scan_directory(scan_path, &mut plugins),
+        }
+    }
+
+    Ok(plugins)
+}
+
+/// Scan a single .vst3 bundle out-of-process by spawning the scanner binary.
+///
+/// The scanner binary loads the module and queries the factory in a child
+/// process. If the child crashes (non-zero exit, signal), this returns a
+/// `HostError::ScanError` instead of crashing the host.
+pub fn scan_bundle_out_of_process(
+    scanner_path: &Path,
+    bundle_path: &Path,
+    timeout: Duration,
+) -> Result<Vec<PluginInfo>, HostError> {
+    let child = Command::new(scanner_path)
+        .arg(bundle_path.as_os_str())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            HostError::ScanError(format!(
+                "failed to spawn scanner for {}: {}",
+                bundle_path.display(),
+                e
+            ))
+        })?;
+
+    // Implement timeout using a thread that kills the child if it takes too long
+    let timeout_ms = timeout.as_millis() as u64;
+    let child_id = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let timer_thread = std::thread::spawn(move || {
+        match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+            Ok(()) => {
+                // Child finished before timeout -- nothing to do
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Timeout: try to kill the child process
+                #[cfg(unix)]
+                {
+                    unsafe {
+                        libc::kill(child_id as i32, libc::SIGKILL);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    // On non-unix, we cannot easily kill by PID here.
+                    // The wait_with_output below will eventually return.
+                    let _ = child_id;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Sender dropped -- child finished
+            }
+        }
+    });
+
+    let output = child.wait_with_output().map_err(|e| {
+        let _ = tx.send(());
+        HostError::ScanError(format!(
+            "scanner process failed for {}: {}",
+            bundle_path.display(),
+            e
+        ))
+    })?;
+
+    // Signal the timer thread that we are done
+    let _ = tx.send(());
+    let _ = timer_thread.join();
+
+    if !output.status.success() {
+        return Err(HostError::ScanError(format!(
+            "scanner crashed or failed for {}: exit={:?}, stderr={}",
+            bundle_path.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr),
+        )));
+    }
+
+    let plugins: Vec<PluginInfo> = serde_json::from_slice(&output.stdout).map_err(|e| {
+        HostError::ScanError(format!(
+            "invalid scanner output for {}: {}",
+            bundle_path.display(),
+            e
+        ))
+    })?;
+
+    Ok(plugins)
+}
+
+/// Default timeout per bundle when scanning out-of-process.
+pub const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Recursively walk a directory looking for .vst3 bundles, using out-of-process
+/// scanning for the binary load path.
+fn scan_directory_safe(dir: &Path, plugins: &mut Vec<PluginInfo>, scanner_binary: &Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            warn!("failed to read directory {}: {}", dir.display(), e);
+            return;
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("failed to read directory entry: {}", e);
+                continue;
+            }
+        };
+
+        let path = entry.path();
+
+        if path.is_dir() {
+            if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("vst3"))
+            {
+                // Found a .vst3 bundle
+                debug!("found VST3 bundle: {}", path.display());
+                match scan_bundle_safe(&path, scanner_binary) {
+                    Ok(mut bundle_plugins) => plugins.append(&mut bundle_plugins),
+                    Err(e) => {
+                        warn!("failed to scan bundle {}: {}", path.display(), e);
+                    }
+                }
+            } else {
+                // Recurse into subdirectories
+                scan_directory_safe(&path, plugins, scanner_binary);
+            }
+        }
+    }
+}
+
+/// Scan a single .vst3 bundle with crash isolation.
+///
+/// Fast path (moduleinfo.json) runs in-process. Slow path (binary load)
+/// runs out-of-process via the scanner binary.
+fn scan_bundle_safe(
+    bundle_path: &Path,
+    scanner_binary: &Path,
+) -> Result<Vec<PluginInfo>, HostError> {
+    // Fast path: try moduleinfo.json (safe in-process -- just file I/O)
+    let moduleinfo_path = bundle_path
+        .join("Contents")
+        .join("Resources")
+        .join("moduleinfo.json");
+
+    if moduleinfo_path.exists() {
+        match scan_moduleinfo(&moduleinfo_path, bundle_path) {
+            Ok(plugins) if !plugins.is_empty() => {
+                debug!(
+                    "extracted {} plugins from moduleinfo.json for {}",
+                    plugins.len(),
+                    bundle_path.display()
+                );
+                return Ok(plugins);
+            }
+            Ok(_) => {
+                debug!(
+                    "moduleinfo.json had no audio processor classes, falling back to out-of-process binary scan"
+                );
+            }
+            Err(e) => {
+                debug!(
+                    "failed to parse moduleinfo.json for {}: {}, falling back to out-of-process binary scan",
+                    bundle_path.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    // Slow path: out-of-process binary scan
+    scan_bundle_out_of_process(scanner_binary, bundle_path, DEFAULT_SCAN_TIMEOUT)
 }
 
 /// Recursively walk a directory looking for .vst3 bundles.
@@ -238,7 +452,7 @@ fn scan_moduleinfo(
 }
 
 /// Load a .vst3 module and query the factory for class info.
-fn scan_bundle_binary(bundle_path: &Path) -> Result<Vec<PluginInfo>, HostError> {
+pub fn scan_bundle_binary(bundle_path: &Path) -> Result<Vec<PluginInfo>, HostError> {
     let module = VstModule::load(bundle_path)?;
     let factory = module.factory();
 
