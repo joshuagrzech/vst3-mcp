@@ -16,7 +16,7 @@ use vst3::Steinberg::Vst::{
     AudioBusBuffers, BusDirections_::*, BusInfo as VstBusInfo, IComponent, IComponentTrait,
     IComponentHandler, IAudioProcessor, IAudioProcessorTrait, IConnectionPoint,
     IConnectionPointTrait, IEditController, IEditControllerTrait,
-    MediaTypes_::*, ParameterInfo, ProcessData, ProcessSetup,
+    MediaTypes_::*, ParameterInfo, ProcessContext, ProcessData, ProcessSetup,
     ProcessModes_::kOffline, SymbolicSampleSizes_::kSample32,
     ParamID, ParamValue,
 };
@@ -63,11 +63,41 @@ pub struct PluginInstance {
     // Parameter change queue
     param_changes: VecDeque<ParameterChange>,
 
+    // Audio bus layout (populated during setup())
+    num_input_buses: i32,
+    num_output_buses: i32,
+    /// Channel counts for each auxiliary input bus (index 1+).
+    aux_input_channel_counts: Vec<i32>,
+    /// Channel counts for each auxiliary output bus (index 1+).
+    aux_output_channel_counts: Vec<i32>,
+
+    // Pre-allocated buffers for process() (populated during setup())
+    input_channel_ptrs: Vec<*mut f32>,
+    output_channel_ptrs: Vec<*mut f32>,
+    /// Pre-allocated AudioBusBuffers for auxiliary input buses (silence).
+    aux_input_buses: Vec<AudioBusBuffers>,
+    /// Pre-allocated AudioBusBuffers for auxiliary output buses (scratch).
+    aux_output_buses: Vec<AudioBusBuffers>,
+    /// Backing storage for auxiliary bus silence/scratch buffers.
+    aux_silence_bufs: Vec<Vec<f32>>,
+    /// Pointer arrays for auxiliary bus channel buffers.
+    aux_channel_ptrs: Vec<Vec<*mut f32>>,
+
+    // ProcessContext state
+    current_sample_rate: f64,
+    sample_position: i64,
+
     // Keep the module alive as long as this instance exists.
     // The module holds the dlopen Library handle; dropping it while
     // COM pointers still reference code in the shared library causes UB.
     _module: Arc<VstModule>,
 }
+
+// Safety: PluginInstance contains *mut f32 pointers in pre-allocated buffer arrays.
+// These pointers are only written and read within process() on a single thread.
+// PluginInstance is always accessed behind a Mutex in AudioHost, ensuring
+// no concurrent access occurs. The raw pointers do not escape the struct.
+unsafe impl Send for PluginInstance {}
 
 impl PluginInstance {
     /// Create a plugin instance from a module and class ID.
@@ -213,6 +243,18 @@ impl PluginInstance {
             _comp_connection: comp_connection,
             _ctrl_connection: ctrl_connection,
             param_changes: VecDeque::new(),
+            num_input_buses: 0,
+            num_output_buses: 0,
+            aux_input_channel_counts: Vec::new(),
+            aux_output_channel_counts: Vec::new(),
+            input_channel_ptrs: Vec::new(),
+            output_channel_ptrs: Vec::new(),
+            aux_input_buses: Vec::new(),
+            aux_output_buses: Vec::new(),
+            aux_silence_bufs: Vec::new(),
+            aux_channel_ptrs: Vec::new(),
+            current_sample_rate: 0.0,
+            sample_position: 0,
             _module: module,
         })
     }
@@ -258,6 +300,127 @@ impl PluginInstance {
 
         // Activate default audio buses
         self.activate_default_buses()?;
+
+        // Store sample rate and reset sample position
+        self.current_sample_rate = sample_rate;
+        self.sample_position = 0;
+
+        // Query actual bus counts from the plugin
+        self.num_input_buses = unsafe {
+            self.component.getBusCount(kAudio as i32, kInput as i32)
+        };
+        self.num_output_buses = unsafe {
+            self.component.getBusCount(kAudio as i32, kOutput as i32)
+        };
+
+        // Query main bus channel count for pre-allocating pointer arrays
+        let main_input_channels = if self.num_input_buses > 0 {
+            let mut info: VstBusInfo = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                self.component.getBusInfo(kAudio as i32, kInput as i32, 0, &mut info)
+            };
+            if result == kResultOk { info.channelCount } else { 0 }
+        } else {
+            0
+        };
+
+        let main_output_channels = if self.num_output_buses > 0 {
+            let mut info: VstBusInfo = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                self.component.getBusInfo(kAudio as i32, kOutput as i32, 0, &mut info)
+            };
+            if result == kResultOk { info.channelCount } else { 0 }
+        } else {
+            0
+        };
+
+        // Pre-allocate channel pointer arrays for the main bus
+        self.input_channel_ptrs = vec![std::ptr::null_mut(); main_input_channels as usize];
+        self.output_channel_ptrs = vec![std::ptr::null_mut(); main_output_channels as usize];
+
+        // Query and pre-allocate auxiliary bus info and buffers
+        self.aux_input_channel_counts.clear();
+        self.aux_output_channel_counts.clear();
+        self.aux_input_buses.clear();
+        self.aux_output_buses.clear();
+        self.aux_silence_bufs.clear();
+        self.aux_channel_ptrs.clear();
+
+        // Auxiliary input buses (index 1+): provide silence buffers
+        for i in 1..self.num_input_buses {
+            let mut info: VstBusInfo = unsafe { std::mem::zeroed() };
+            let ch_count = unsafe {
+                let result = self.component.getBusInfo(kAudio as i32, kInput as i32, i, &mut info);
+                if result == kResultOk { info.channelCount } else { 0 }
+            };
+            self.aux_input_channel_counts.push(ch_count);
+
+            // Allocate silence buffer for each channel of this aux bus
+            for _ in 0..ch_count {
+                self.aux_silence_bufs.push(vec![0.0f32; max_block_size as usize]);
+            }
+        }
+
+        // Auxiliary output buses (index 1+): provide scratch buffers
+        for i in 1..self.num_output_buses {
+            let mut info: VstBusInfo = unsafe { std::mem::zeroed() };
+            let ch_count = unsafe {
+                let result = self.component.getBusInfo(kAudio as i32, kOutput as i32, i, &mut info);
+                if result == kResultOk { info.channelCount } else { 0 }
+            };
+            self.aux_output_channel_counts.push(ch_count);
+
+            // Allocate scratch buffer for each channel of this aux bus
+            for _ in 0..ch_count {
+                self.aux_silence_bufs.push(vec![0.0f32; max_block_size as usize]);
+            }
+        }
+
+        // Build persistent pointer arrays and AudioBusBuffers for aux buses
+        // We need stable pointers, so we build them after all aux_silence_bufs are allocated.
+        let mut buf_idx = 0;
+
+        for &ch_count in &self.aux_input_channel_counts {
+            let mut ptrs: Vec<*mut f32> = Vec::with_capacity(ch_count as usize);
+            for _ in 0..ch_count {
+                ptrs.push(self.aux_silence_bufs[buf_idx].as_mut_ptr());
+                buf_idx += 1;
+            }
+            let mut bus: AudioBusBuffers = unsafe { std::mem::zeroed() };
+            bus.numChannels = ch_count;
+            bus.silenceFlags = u64::MAX; // all channels are silence
+            bus.__field0.channelBuffers32 = if ptrs.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                ptrs.as_mut_ptr()
+            };
+            self.aux_channel_ptrs.push(ptrs);
+            self.aux_input_buses.push(bus);
+        }
+
+        for &ch_count in &self.aux_output_channel_counts {
+            let mut ptrs: Vec<*mut f32> = Vec::with_capacity(ch_count as usize);
+            for _ in 0..ch_count {
+                ptrs.push(self.aux_silence_bufs[buf_idx].as_mut_ptr());
+                buf_idx += 1;
+            }
+            let mut bus: AudioBusBuffers = unsafe { std::mem::zeroed() };
+            bus.numChannels = ch_count;
+            bus.silenceFlags = 0;
+            bus.__field0.channelBuffers32 = if ptrs.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                ptrs.as_mut_ptr()
+            };
+            self.aux_channel_ptrs.push(ptrs);
+            self.aux_output_buses.push(bus);
+        }
+
+        debug!(
+            "bus layout: {} input buses (main: {} ch), {} output buses (main: {} ch)",
+            self.num_input_buses, main_input_channels,
+            self.num_output_buses, main_output_channels
+        );
 
         self.state = PluginState::SetupDone;
         debug!("plugin setup complete ({}Hz, {} block size)", sample_rate, max_block_size);
@@ -365,6 +528,8 @@ impl PluginInstance {
     /// Process a block of audio. Only available in Processing state.
     ///
     /// `inputs` and `outputs` are per-channel slices (planar/deinterleaved format).
+    /// These correspond to the main bus (bus index 0). Auxiliary buses are
+    /// automatically provided with silence (input) or scratch (output) buffers.
     pub fn process(
         &mut self,
         inputs: &[&[f32]],
@@ -379,62 +544,85 @@ impl PluginInstance {
         }
 
         unsafe {
-            // Build input AudioBusBuffers
-            let mut input_channel_ptrs: Vec<*mut f32> = inputs
-                .iter()
-                .map(|ch| ch.as_ptr() as *mut f32)
-                .collect();
+            // Write caller's pointers into pre-allocated channel pointer arrays (no allocation)
+            for (i, ch) in inputs.iter().enumerate() {
+                if i < self.input_channel_ptrs.len() {
+                    self.input_channel_ptrs[i] = ch.as_ptr() as *mut f32;
+                }
+            }
 
-            let mut input_bus = AudioBusBuffers {
-                numChannels: inputs.len() as i32,
-                silenceFlags: 0,
-                __field0: std::mem::zeroed(),
-            };
-            input_bus.__field0.channelBuffers32 = if input_channel_ptrs.is_empty() {
+            for (i, ch) in outputs.iter_mut().enumerate() {
+                if i < self.output_channel_ptrs.len() {
+                    self.output_channel_ptrs[i] = ch.as_mut_ptr();
+                }
+            }
+
+            // Build main input AudioBusBuffers
+            let mut input_bus: AudioBusBuffers = std::mem::zeroed();
+            input_bus.numChannels = self.input_channel_ptrs.len() as i32;
+            input_bus.silenceFlags = 0;
+            input_bus.__field0.channelBuffers32 = if self.input_channel_ptrs.is_empty() {
                 std::ptr::null_mut()
             } else {
-                input_channel_ptrs.as_mut_ptr()
+                self.input_channel_ptrs.as_mut_ptr()
             };
 
-            // Build output AudioBusBuffers
-            let mut output_channel_ptrs: Vec<*mut f32> = outputs
-                .iter_mut()
-                .map(|ch| ch.as_mut_ptr())
-                .collect();
-
-            let mut output_bus = AudioBusBuffers {
-                numChannels: outputs.len() as i32,
-                silenceFlags: 0,
-                __field0: std::mem::zeroed(),
-            };
-            output_bus.__field0.channelBuffers32 = if output_channel_ptrs.is_empty() {
+            // Build main output AudioBusBuffers
+            let mut output_bus: AudioBusBuffers = std::mem::zeroed();
+            output_bus.numChannels = self.output_channel_ptrs.len() as i32;
+            output_bus.silenceFlags = 0;
+            output_bus.__field0.channelBuffers32 = if self.output_channel_ptrs.is_empty() {
                 std::ptr::null_mut()
             } else {
-                output_channel_ptrs.as_mut_ptr()
+                self.output_channel_ptrs.as_mut_ptr()
             };
 
-            // Build ProcessData
+            // Assemble all input buses: main bus + auxiliary buses
+            let mut all_input_buses: Vec<AudioBusBuffers> = Vec::with_capacity(self.num_input_buses as usize);
+            if self.num_input_buses > 0 {
+                all_input_buses.push(input_bus);
+            }
+            for aux in &self.aux_input_buses {
+                all_input_buses.push(*aux);
+            }
+
+            // Assemble all output buses: main bus + auxiliary buses
+            let mut all_output_buses: Vec<AudioBusBuffers> = Vec::with_capacity(self.num_output_buses as usize);
+            if self.num_output_buses > 0 {
+                all_output_buses.push(output_bus);
+            }
+            for aux in &self.aux_output_buses {
+                all_output_buses.push(*aux);
+            }
+
+            // Build ProcessContext with sampleRate and advancing projectTimeSamples
+            let mut context: ProcessContext = std::mem::zeroed();
+            context.sampleRate = self.current_sample_rate;
+            context.projectTimeSamples = self.sample_position;
+            context.state = 0; // not playing
+
+            // Build ProcessData with correct bus counts
             let mut process_data = ProcessData {
                 processMode: kOffline as i32,
                 symbolicSampleSize: kSample32 as i32,
                 numSamples: num_samples,
-                numInputs: if inputs.is_empty() { 0 } else { 1 },
-                numOutputs: if outputs.is_empty() { 0 } else { 1 },
-                inputs: if inputs.is_empty() {
+                numInputs: self.num_input_buses,
+                numOutputs: self.num_output_buses,
+                inputs: if all_input_buses.is_empty() {
                     std::ptr::null_mut()
                 } else {
-                    &mut input_bus
+                    all_input_buses.as_mut_ptr()
                 },
-                outputs: if outputs.is_empty() {
+                outputs: if all_output_buses.is_empty() {
                     std::ptr::null_mut()
                 } else {
-                    &mut output_bus
+                    all_output_buses.as_mut_ptr()
                 },
                 inputParameterChanges: std::ptr::null_mut(),
                 outputParameterChanges: std::ptr::null_mut(),
                 inputEvents: std::ptr::null_mut(),
                 outputEvents: std::ptr::null_mut(),
-                processContext: std::ptr::null_mut(),
+                processContext: &mut context,
             };
 
             // TODO: Deliver queued parameter changes via IParameterChanges
@@ -450,6 +638,9 @@ impl PluginInstance {
                 )));
             }
         }
+
+        // Advance sample position for the next ProcessContext
+        self.sample_position += num_samples as i64;
 
         Ok(())
     }
