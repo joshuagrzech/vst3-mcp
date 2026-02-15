@@ -24,3 +24,7 @@ libc = "0.2"
 [[bin]]
 name = "agent-audio-scanner"
 path = "src/bin/scanner.rs"
+
+[[bin]]
+name = "agent-audio-integration-test"
+path = "src/bin/integration_test.rs"

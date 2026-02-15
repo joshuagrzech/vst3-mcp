@@ -574,6 +574,22 @@ fn is_audio_processor_class(category: &str, sub_categories: &str) -> bool {
     false
 }
 
+/// Convert a hex string (32 hex chars) back to a TUID (16-byte array).
+///
+/// Returns None if the string is not exactly 32 valid hex characters.
+pub fn hex_string_to_tuid(hex: &str) -> Option<[std::ffi::c_char; 16]> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut tuid = [0i8; 16];
+    for i in 0..16 {
+        let byte_str = &hex[i * 2..i * 2 + 2];
+        let byte = u8::from_str_radix(byte_str, 16).ok()?;
+        tuid[i] = byte as i8;
+    }
+    Some(tuid)
+}
+
 /// Convert a TUID (16-byte array) to a hex string.
 fn tuid_to_hex_string(tuid: &[std::ffi::c_char; 16]) -> String {
     tuid.iter()

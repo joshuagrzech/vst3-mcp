@@ -565,6 +565,25 @@ impl PluginInstance {
         buses
     }
 
+    /// Check whether this plugin uses a separate (split) controller.
+    ///
+    /// Returns `true` if the edit controller was created as a separate object
+    /// from the component (split architecture). Returns `false` if the controller
+    /// was obtained by casting the component (unified architecture), or if no
+    /// controller is available.
+    pub fn is_controller_separate(&self) -> bool {
+        let ctrl = match &self.controller {
+            Some(c) => c,
+            None => return false,
+        };
+
+        let comp_as_ctrl: Option<ComPtr<IEditController>> = self.component.cast();
+        match comp_as_ctrl {
+            Some(c) => !std::ptr::eq(c.as_ptr(), ctrl.as_ptr()),
+            None => true, // component doesn't implement IEditController, so controller must be separate
+        }
+    }
+
     /// Get the component COM pointer (for state save/restore).
     pub fn component(&self) -> &ComPtr<IComponent> {
         &self.component
