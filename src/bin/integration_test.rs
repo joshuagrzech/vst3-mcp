@@ -21,7 +21,7 @@ use tracing::debug;
 use vst3_mcp_host::hosting::host_app::{ComponentHandler, HostApp};
 use vst3_mcp_host::hosting::module::VstModule;
 use vst3_mcp_host::hosting::plugin::PluginInstance;
-use vst3_mcp_host::hosting::scanner::{hex_string_to_tuid, scan_plugins};
+use vst3_mcp_host::hosting::scanner::{hex_string_to_tuid, scan_plugins_safe};
 use vst3_mcp_host::hosting::types::{PluginInfo, PluginState};
 
 /// CLI arguments parsed manually (no external arg-parsing crate needed).
@@ -133,6 +133,17 @@ impl TestResult {
 
 // ---- Phase A: Plugin Discovery ----
 
+fn find_scanner_binary() -> Option<PathBuf> {
+    // Look for the scanner binary next to our own executable
+    if let Ok(exe) = std::env::current_exe() {
+        let scanner = exe.parent()?.join("agent-audio-scanner");
+        if scanner.exists() {
+            return Some(scanner);
+        }
+    }
+    None
+}
+
 fn phase_a_discovery(scan_path: Option<&str>) -> (Vec<PluginInfo>, Vec<TestResult>) {
     let mut results = Vec::new();
 
@@ -142,7 +153,16 @@ fn phase_a_discovery(scan_path: Option<&str>) -> (Vec<PluginInfo>, Vec<TestResul
     println!("========================================");
     println!();
 
-    let plugins = match scan_plugins(scan_path) {
+    let scanner_binary = find_scanner_binary();
+    if let Some(ref path) = scanner_binary {
+        println!("  Using out-of-process scanner: {}", path.display());
+    } else {
+        println!("  WARNING: Scanner binary not found, using in-process scanning");
+        println!("  Build it first: cargo build --bin agent-audio-scanner");
+    }
+    println!();
+
+    let plugins = match scan_plugins_safe(scan_path, scanner_binary.as_deref()) {
         Ok(p) => p,
         Err(e) => {
             println!("  FAIL  Scanner returned error: {}", e);
