@@ -8,6 +8,7 @@
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::sync::Arc;
 
 use tracing::{debug, warn};
 use vst3::com_scrape_types::{ComPtr, ComWrapper};
@@ -20,12 +21,13 @@ use vst3::Steinberg::Vst::{
     ParamID, ParamValue,
 };
 use vst3::Steinberg::{
-    kResultOk, FUnknown, IBStream, IBStreamTrait, IPluginBaseTrait, IPluginFactory,
+    kResultOk, FUnknown, IBStream, IBStreamTrait, IPluginBaseTrait,
     IPluginFactoryTrait, TUID, int32,
     IBStream_::IStreamSeekMode_::*,
 };
 
 use super::host_app::{ComponentHandler, HostApp};
+use super::module::VstModule;
 use super::types::{
     BusDirection, BusInfo, BusType, HostError, ParamInfo, PluginState,
 };
@@ -60,18 +62,27 @@ pub struct PluginInstance {
 
     // Parameter change queue
     param_changes: VecDeque<ParameterChange>,
+
+    // Keep the module alive as long as this instance exists.
+    // The module holds the dlopen Library handle; dropping it while
+    // COM pointers still reference code in the shared library causes UB.
+    _module: Arc<VstModule>,
 }
 
 impl PluginInstance {
-    /// Create a plugin instance from a factory by class ID.
+    /// Create a plugin instance from a module and class ID.
     ///
+    /// The `module` is wrapped in `Arc` to ensure the shared library
+    /// cannot be unloaded while this instance (and its COM pointers) exist.
     /// The class_id should be the raw 16-byte TUID from scanning.
     pub fn from_factory(
-        factory: &ComPtr<IPluginFactory>,
+        module: Arc<VstModule>,
         class_id: &TUID,
         host_app: ComWrapper<HostApp>,
         handler: ComWrapper<ComponentHandler>,
     ) -> Result<Self, HostError> {
+        let factory = module.factory();
+
         // 1. Create the component via factory.createInstance()
         let component: ComPtr<IComponent> = unsafe {
             let mut obj: *mut c_void = std::ptr::null_mut();
@@ -202,6 +213,7 @@ impl PluginInstance {
             _comp_connection: comp_connection,
             _ctrl_connection: ctrl_connection,
             param_changes: VecDeque::new(),
+            _module: module,
         })
     }
 
@@ -589,6 +601,12 @@ impl Drop for PluginInstance {
     fn drop(&mut self) {
         // Enforce correct teardown order:
         // setProcessing(false) -> setActive(false) -> disconnect -> terminate
+        //
+        // We use Option::take() to move COM pointers out of the struct so they
+        // are dropped at the end of their enclosing block, BEFORE we call
+        // terminate(). This ensures COM Release() happens in the correct order
+        // relative to terminate() calls, rather than relying on implicit struct
+        // field drop order.
 
         if self.state == PluginState::Processing {
             unsafe {
@@ -604,18 +622,24 @@ impl Drop for PluginInstance {
             self.state = PluginState::SetupDone;
         }
 
-        // Disconnect connection points
-        if let (Some(ccp), Some(kcp)) = (&self._comp_connection, &self._ctrl_connection) {
+        // Disconnect and drop connection point COM pointers BEFORE terminate.
+        // take() moves the value out of the Option, so ccp and kcp are dropped
+        // at the end of this `if let` block, releasing their COM references.
+        if let (Some(ccp), Some(kcp)) = (
+            self._comp_connection.take(),
+            self._ctrl_connection.take(),
+        ) {
             unsafe {
                 let _ = ccp.disconnect(kcp.as_ptr());
                 let _ = kcp.disconnect(ccp.as_ptr());
             }
+            // ccp and kcp dropped here, releasing COM references BEFORE terminate
         }
 
-        // Terminate controller (if separate from component)
-        if let Some(ref ctrl) = self.controller {
-            // Only terminate if it's a separate object (not the component cast to IEditController)
-            // We can check by comparing raw pointers
+        // Terminate controller (if separate from component).
+        // take() moves the controller out so it is dropped at the end of this
+        // block, releasing its COM reference BEFORE component.terminate().
+        if let Some(ctrl) = self.controller.take() {
             let comp_as_ctrl: Option<ComPtr<IEditController>> = self.component.cast();
             let is_same = comp_as_ctrl.as_ref().is_some_and(|c| {
                 std::ptr::eq(c.as_ptr(), ctrl.as_ptr())
@@ -626,12 +650,16 @@ impl Drop for PluginInstance {
                     let _ = ctrl.terminate();
                 }
             }
+            // ctrl dropped here, releasing COM reference BEFORE component terminate
         }
 
         // Terminate component
         unsafe {
             let _ = self.component.terminate();
         }
+        // component and processor ComPtrs dropped when struct is dropped.
+        // _module (Arc<VstModule>) is dropped last, potentially unloading the
+        // shared library only after all COM pointers have been released.
 
         debug!("plugin instance dropped cleanly");
     }

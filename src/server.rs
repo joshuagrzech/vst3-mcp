@@ -72,9 +72,10 @@ pub struct LoadPresetRequest {
 pub struct AudioHost {
     plugin: Arc<Mutex<Option<PluginInstance>>>,
     plugin_info: Arc<Mutex<Option<PluginInfo>>>,
-    /// Keep the VST3 module alive while the plugin is loaded.
-    /// The module must outlive the PluginInstance.
-    module: Arc<Mutex<Option<VstModule>>>,
+    /// Keep a reference to the VST3 module while the plugin is loaded.
+    /// PluginInstance also holds an Arc<VstModule>, ensuring the module
+    /// outlives the plugin instance even if this field is cleared first.
+    module: Arc<Mutex<Option<Arc<VstModule>>>>,
     /// Last scan results cached for load_plugin lookup.
     scan_cache: Arc<Mutex<Vec<PluginInfo>>>,
     tool_router: ToolRouter<Self>,
@@ -158,9 +159,11 @@ impl AudioHost {
             }
         };
 
-        // Load the VST3 module
-        let module = VstModule::load(&info.path)
-            .map_err(|e| format!("Failed to load module {}: {}", info.path.display(), e))?;
+        // Load the VST3 module, wrapped in Arc so PluginInstance can hold a reference
+        let module = Arc::new(
+            VstModule::load(&info.path)
+                .map_err(|e| format!("Failed to load module {}: {}", info.path.display(), e))?,
+        );
 
         // Parse the UID hex string to TUID bytes
         let class_id = hex_to_tuid(&uid_upper)
@@ -171,8 +174,8 @@ impl AudioHost {
         let host_app = HostApp::new();
         let handler = ComponentHandler::new();
 
-        // Create plugin instance from factory
-        let mut instance = PluginInstance::from_factory(module.factory(), &class_id, host_app, handler)
+        // Create plugin instance from factory (takes Arc<VstModule>)
+        let mut instance = PluginInstance::from_factory(Arc::clone(&module), &class_id, host_app, handler)
             .map_err(|e| format!("Failed to create plugin instance: {}", e))?;
 
         // Setup, activate, start processing

@@ -5,6 +5,7 @@
 //! and provides safe access to the plugin factory.
 
 use std::ffi::c_void;
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 
 use libloading::{Library, Symbol};
@@ -22,7 +23,7 @@ type ExitDllFn = unsafe extern "system" fn() -> bool;
 /// Handles dlopen of the platform-specific shared library inside a .vst3 bundle,
 /// calls InitDll on load, and ExitDll on drop before unloading the library.
 pub struct VstModule {
-    factory: ComPtr<IPluginFactory>,
+    factory: ManuallyDrop<ComPtr<IPluginFactory>>,
     _library: Library,
     _path: PathBuf,
 }
@@ -78,7 +79,7 @@ impl VstModule {
         };
 
         Ok(VstModule {
-            factory,
+            factory: ManuallyDrop::new(factory),
             _library: library,
             _path: bundle_path.to_path_buf(),
         })
@@ -86,21 +87,23 @@ impl VstModule {
 
     /// Returns a reference to the plugin factory.
     pub fn factory(&self) -> &ComPtr<IPluginFactory> {
-        &self.factory
+        &*self.factory
     }
 }
 
 impl Drop for VstModule {
     fn drop(&mut self) {
-        // Drop the factory COM pointer first (releases the reference).
-        // Then call ExitDll before the library is unloaded.
-        // We need to drop factory before library, but Rust drops fields in declaration order,
-        // so factory is dropped before _library. We just need to call ExitDll.
+        // Drop factory COM pointer FIRST (releases reference to plugin code)
+        unsafe {
+            ManuallyDrop::drop(&mut self.factory);
+        }
+        // THEN call ExitDll
         unsafe {
             if let Ok(exit_dll) = self._library.get::<ExitDllFn>(b"ExitDll\0") {
                 exit_dll();
             }
         }
+        // Library handle (_library) dropped last when struct fields are dropped
     }
 }
 
