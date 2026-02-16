@@ -13,6 +13,88 @@ For offline file processing (legacy host), see `../README.md`.
 5. LLM sends realtime parameter events through MCP.
 6. Audio callback applies queued events while the plugin is running.
 
+## Optional: Global MCP Router (stable endpoint)
+
+Each wrapper instance binds to an **ephemeral port** (`127.0.0.1:0`), so the MCP endpoint changes every time you insert the plugin.
+
+If you want to configure **one** MCP server in your coding agent (Claude/Gemini/Cursor) and have it automatically route to whichever wrapper instances are running, use the router daemon:
+
+- Router daemon: `agentaudio-mcp-routerd` (Streamable HTTP MCP at `/mcp`)
+- Cursor shim: `agentaudio-mcp-stdio` (stdio MCP → forwards to router daemon)
+- Installer: `agentaudio-mcp` (add/remove the MCP server entry in common configs)
+
+### Start the router daemon
+
+```bash
+cargo run -p agentaudio-mcp-router --bin agentaudio-mcp-routerd
+```
+
+The router listens on `http://127.0.0.1:38765` by default. MCP endpoint is:
+
+`http://127.0.0.1:38765/mcp`
+
+### Wrapper auto-registration
+
+When the wrapper starts its embedded MCP server, it will (best-effort) register itself with the router daemon:
+- `POST /register` once at startup
+- `POST /heartbeat` every ~3s
+- `POST /unregister` on teardown
+
+Override router base URL via:
+- `AGENTAUDIO_MCP_ROUTERD=http://127.0.0.1:38765`
+
+### Install into MCP clients (add + remove)
+
+Install (idempotent):
+
+```bash
+cargo run --bin agentaudio-mcp -- install
+```
+
+Remove (idempotent):
+
+```bash
+cargo run --bin agentaudio-mcp -- uninstall
+```
+
+Status:
+
+```bash
+cargo run --bin agentaudio-mcp -- status
+```
+
+On Linux, this patches (with backups + atomic writes):
+- Claude Code: `~/.claude.json` (adds `mcpServers.agentaudio-router` pointing at router HTTP `/mcp`)
+- Gemini CLI: `~/.gemini/settings.json` (adds `mcpServers.agentaudio-router.httpUrl`)
+- Cursor: `~/.config/cursor/mcp.json` (adds `mcpServers.agentaudio-router` as a stdio server using `agentaudio-mcp-stdio`)
+
+### systemd user service example
+
+Create `~/.config/systemd/user/agentaudio-mcp-routerd.service`:
+
+```ini
+[Unit]
+Description=AgentAudio MCP Router Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/agentaudio-mcp-routerd
+Restart=on-failure
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
+```
+
+Then:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now agentaudio-mcp-routerd
+systemctl --user status agentaudio-mcp-routerd
+```
+
 ## Build and Test
 
 ```bash

@@ -529,6 +529,7 @@ impl ServerHandler for WrapperMcpServer {
 struct EmbeddedMcpServerHandle {
     cancel: CancellationToken,
     join_handle: Option<std::thread::JoinHandle<()>>,
+    router_join_handle: Option<std::thread::JoinHandle<()>>,
     endpoint: String,
 }
 
@@ -589,18 +590,83 @@ impl EmbeddedMcpServerHandle {
             }
         }
 
+        let router_join_handle =
+            start_router_registration_thread(cancel.clone(), shared.clone(), endpoint.clone());
+
         Ok(Self {
             cancel,
             join_handle: Some(join_handle),
+            router_join_handle,
             endpoint,
         })
     }
+}
+
+fn start_router_registration_thread(
+    cancel: CancellationToken,
+    shared: SharedState,
+    endpoint: String,
+) -> Option<std::thread::JoinHandle<()>> {
+    let router_base = std::env::var("AGENTAUDIO_MCP_ROUTERD")
+        .ok()
+        .unwrap_or_else(|| "http://127.0.0.1:38765".to_string());
+    let router_base = router_base.trim().trim_end_matches('/').to_string();
+    if router_base.is_empty() {
+        return None;
+    }
+
+    let instance_id = shared.instance_id.to_string();
+    let mcp_name = shared.mcp_name();
+    let register_url = format!("{router_base}/register");
+    let heartbeat_url = format!("{router_base}/heartbeat");
+    let unregister_url = format!("{router_base}/unregister");
+
+    Some(std::thread::spawn(move || {
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        // Best-effort register. If routerd is down, all errors are ignored.
+        let _ = client
+            .post(&register_url)
+            .json(&serde_json::json!({
+                "instance_id": instance_id,
+                "endpoint": endpoint,
+                "mcp_name": mcp_name,
+            }))
+            .send();
+
+        // Heartbeat loop; routerd TTL pruning keeps the registry tidy even if we never unregister.
+        while !cancel.is_cancelled() {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let _ = client
+                .post(&heartbeat_url)
+                .json(&serde_json::json!({
+                    "instance_id": shared.instance_id.to_string(),
+                }))
+                .send();
+        }
+
+        let _ = client
+            .post(&unregister_url)
+            .json(&serde_json::json!({
+                "instance_id": shared.instance_id.to_string(),
+            }))
+            .send();
+    }))
 }
 
 impl Drop for EmbeddedMcpServerHandle {
     fn drop(&mut self) {
         self.cancel.cancel();
         if let Some(join) = self.join_handle.take() {
+            let _ = join.join();
+        }
+        if let Some(join) = self.router_join_handle.take() {
             let _ = join.join();
         }
     }

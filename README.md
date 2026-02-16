@@ -30,6 +30,34 @@ The wrapper plugin in `crates/agentaudio-wrapper-vst3` provides:
 cargo build --manifest-path crates/agentaudio-wrapper-vst3/Cargo.toml
 ```
 
+## Optional: Global MCP Router (recommended for coding agents)
+
+The wrapper plugin exposes a per-instance MCP endpoint on an **ephemeral** port (`http://127.0.0.1:<dynamic>/mcp`). To avoid manually reconfiguring clients, this repo includes a **stable router daemon** plus an **installer** that adds/removes a single MCP server entry for multiple coding agents.
+
+### Start the router daemon
+
+```bash
+cargo run -p agentaudio-mcp-router --bin agentaudio-mcp-routerd
+```
+
+Defaults:
+- bind: `127.0.0.1:38765` (override with `AGENTAUDIO_MCP_ROUTERD_BIND`)
+- MCP endpoint: `http://127.0.0.1:38765/mcp`
+
+### Install into Claude Code / Gemini CLI / Cursor
+
+```bash
+cargo run --bin agentaudio-mcp -- install
+```
+
+To remove:
+
+```bash
+cargo run --bin agentaudio-mcp -- uninstall
+```
+
+Cursor is configured to use the stdio shim (`agentaudio-mcp-stdio`) which forwards tool calls to the router daemon over HTTP.
+
 ### Run tests
 
 ```bash
