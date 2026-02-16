@@ -15,6 +15,12 @@ enum WorkerMsg {
     Done(Result<(), String>),
 }
 
+#[derive(Clone, Copy, Debug)]
+enum WorkerAction {
+    Install,
+    Uninstall,
+}
+
 #[derive(Default)]
 struct InstallerApp {
     // UI state
@@ -64,17 +70,29 @@ impl InstallerApp {
     }
 
     fn start_install(&mut self) {
+        self.start_worker(WorkerAction::Install);
+    }
+
+    fn start_uninstall(&mut self) {
+        self.start_worker(WorkerAction::Uninstall);
+    }
+
+    fn start_worker(&mut self, action: WorkerAction) {
         if self.running {
             return;
         }
         self.running = true;
         self.last_result = None;
-        self.append_log("Starting install…");
+        match action {
+            WorkerAction::Install => self.append_log("Starting install…"),
+            WorkerAction::Uninstall => self.append_log("Starting uninstall…"),
+        }
 
         let (tx, rx) = mpsc::channel::<WorkerMsg>();
         self.worker_rx = Some(rx);
 
         let opts = WorkerOpts {
+            action,
             install_dir: self.install_dir.clone(),
             router_base: self.router_base.clone(),
             install_plugin: self.install_plugin,
@@ -154,6 +172,12 @@ impl eframe::App for InstallerApp {
                 {
                     self.start_install();
                 }
+                if ui
+                    .add_enabled(install_enabled, egui::Button::new("Uninstall"))
+                    .clicked()
+                {
+                    self.start_uninstall();
+                }
 
                 if self.running {
                     ui.label("Running…");
@@ -187,6 +211,7 @@ impl eframe::App for InstallerApp {
 
 #[derive(Clone, Debug)]
 struct WorkerOpts {
+    action: WorkerAction,
     install_dir: String,
     router_base: String,
     install_plugin: bool,
@@ -206,116 +231,189 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
         )))
         .ok();
 
-        if opts.install_plugin {
-            tx.send(WorkerMsg::Log("Building + bundling VST3 wrapper…".to_string()))
-                .ok();
-            let mut cmd = Command::new("bash");
-            cmd.arg("./scripts/build-and-install-vst3.sh")
-                .arg("release")
-                .arg(expand_tilde(&opts.install_dir))
-                .current_dir(&repo_root);
-            run_cmd_stream(&tx, cmd)?;
-        } else {
-            tx.send(WorkerMsg::Log("Skipping VST3 wrapper install.".to_string()))
-                .ok();
-        }
-
-        tx.send(WorkerMsg::Log("Building router + shims…".to_string()))
-            .ok();
-        let mut cmd = Command::new("cargo");
-        cmd.arg("build")
-            .arg("--release")
-            .arg("-p")
-            .arg("agentaudio-mcp-router")
-            .arg("--bin")
-            .arg("agentaudio-mcp-routerd")
-            .current_dir(&repo_root);
-        run_cmd_stream(&tx, cmd)?;
-
-        let mut cmd = Command::new("cargo");
-        cmd.arg("build")
-            .arg("--release")
-            .arg("--bin")
-            .arg("agentaudio-mcp-stdio")
-            .current_dir(&repo_root);
-        run_cmd_stream(&tx, cmd)?;
-
-        let mut cmd = Command::new("cargo");
-        cmd.arg("build")
-            .arg("--release")
-            .arg("--bin")
-            .arg("agentaudio-mcp")
-            .current_dir(&repo_root);
-        run_cmd_stream(&tx, cmd)?;
-
         let router_base = opts.router_base.trim().trim_end_matches('/').to_string();
         if router_base.is_empty() {
             return Err("Router base URL is empty".to_string());
         }
 
         let local_bin = expand_tilde("~/.local/bin");
-        if opts.install_binaries {
-            tx.send(WorkerMsg::Log(format!(
-                "Installing binaries to {} …",
-                local_bin.display()
-            )))
-            .ok();
+        match opts.action {
+            WorkerAction::Install => {
+                if opts.install_plugin {
+                    tx.send(WorkerMsg::Log("Building + bundling VST3 wrapper…".to_string()))
+                        .ok();
+                    let mut cmd = Command::new("bash");
+                    cmd.arg("./scripts/build-and-install-vst3.sh")
+                        .arg("release")
+                        .arg(expand_tilde(&opts.install_dir))
+                        .current_dir(&repo_root);
+                    run_cmd_stream(&tx, cmd)?;
+                } else {
+                    tx.send(WorkerMsg::Log("Skipping VST3 wrapper install.".to_string()))
+                        .ok();
+                }
 
-            fs::create_dir_all(&local_bin).map_err(|e| e.to_string())?;
+                tx.send(WorkerMsg::Log("Building router + shims…".to_string()))
+                    .ok();
+                let mut cmd = Command::new("cargo");
+                cmd.arg("build")
+                    .arg("--release")
+                    .arg("-p")
+                    .arg("agentaudio-mcp-router")
+                    .arg("--bin")
+                    .arg("agentaudio-mcp-routerd")
+                    .current_dir(&repo_root);
+                run_cmd_stream(&tx, cmd)?;
 
-            let routerd_src = repo_root.join("target/release/agentaudio-mcp-routerd");
-            let stdio_src = repo_root.join("target/release/agentaudio-mcp-stdio");
-            let mcp_src = repo_root.join("target/release/agentaudio-mcp");
+                let mut cmd = Command::new("cargo");
+                cmd.arg("build")
+                    .arg("--release")
+                    .arg("--bin")
+                    .arg("agentaudio-mcp-stdio")
+                    .current_dir(&repo_root);
+                run_cmd_stream(&tx, cmd)?;
 
-            copy_executable(&tx, &routerd_src, &local_bin.join("agentaudio-mcp-routerd"))?;
-            copy_executable(&tx, &stdio_src, &local_bin.join("agentaudio-mcp-stdio"))?;
-            copy_executable(&tx, &mcp_src, &local_bin.join("agentaudio-mcp"))?;
-        } else {
-            tx.send(WorkerMsg::Log("Skipping binary installation.".to_string()))
-                .ok();
-        }
+                let mut cmd = Command::new("cargo");
+                cmd.arg("build")
+                    .arg("--release")
+                    .arg("--bin")
+                    .arg("agentaudio-mcp")
+                    .current_dir(&repo_root);
+                run_cmd_stream(&tx, cmd)?;
 
-        if opts.enable_router_service {
-            tx.send(WorkerMsg::Log("Configuring router systemd user service…".to_string()))
-                .ok();
-            install_systemd_user_service(&tx, &local_bin, &router_base)?;
-            let mut cmd = Command::new("systemctl");
-            cmd.arg("--user").arg("daemon-reload");
-            run_cmd_stream(&tx, cmd)?;
+                if opts.install_binaries {
+                    tx.send(WorkerMsg::Log(format!(
+                        "Installing binaries to {} …",
+                        local_bin.display()
+                    )))
+                    .ok();
 
-            let mut cmd = Command::new("systemctl");
-            cmd.arg("--user")
-                .arg("enable")
-                .arg("--now")
-                .arg("agentaudio-mcp-routerd.service");
-            run_cmd_stream(&tx, cmd)?;
-        } else {
-            tx.send(WorkerMsg::Log("Skipping router service activation.".to_string()))
-                .ok();
-        }
+                    fs::create_dir_all(&local_bin).map_err(|e| e.to_string())?;
 
-        if opts.configure_agents {
-            tx.send(WorkerMsg::Log("Patching MCP client configs…".to_string()))
-                .ok();
+                    let routerd_src = repo_root.join("target/release/agentaudio-mcp-routerd");
+                    let stdio_src = repo_root.join("target/release/agentaudio-mcp-stdio");
+                    let mcp_src = repo_root.join("target/release/agentaudio-mcp");
 
-            // Prefer installed binary, but fall back to repo target path.
-            let mcp_bin = local_bin.join("agentaudio-mcp");
-            let mut cmd = if mcp_bin.exists() {
-                Command::new(mcp_bin)
-            } else {
-                Command::new(repo_root.join("target/release/agentaudio-mcp"))
-            };
-            cmd.arg("install").arg("--router").arg(&router_base);
-            run_cmd_stream(&tx, cmd)?;
-        } else {
-            tx.send(WorkerMsg::Log("Skipping MCP client config.".to_string()))
-                .ok();
+                    copy_executable(&tx, &routerd_src, &local_bin.join("agentaudio-mcp-routerd"))?;
+                    copy_executable(&tx, &stdio_src, &local_bin.join("agentaudio-mcp-stdio"))?;
+                    copy_executable(&tx, &mcp_src, &local_bin.join("agentaudio-mcp"))?;
+                } else {
+                    tx.send(WorkerMsg::Log("Skipping binary installation.".to_string()))
+                        .ok();
+                }
+
+                if opts.enable_router_service {
+                    tx.send(WorkerMsg::Log("Configuring router systemd user service…".to_string()))
+                        .ok();
+                    install_systemd_user_service(&tx, &local_bin, &router_base)?;
+                    let mut cmd = Command::new("systemctl");
+                    cmd.arg("--user").arg("daemon-reload");
+                    run_cmd_stream(&tx, cmd)?;
+
+                    let mut cmd = Command::new("systemctl");
+                    cmd.arg("--user")
+                        .arg("enable")
+                        .arg("--now")
+                        .arg("agentaudio-mcp-routerd.service");
+                    run_cmd_stream(&tx, cmd)?;
+                } else {
+                    tx.send(WorkerMsg::Log("Skipping router service activation.".to_string()))
+                        .ok();
+                }
+
+                if opts.configure_agents {
+                    tx.send(WorkerMsg::Log("Patching MCP client configs…".to_string()))
+                        .ok();
+                    run_agentaudio_mcp(&tx, &repo_root, &local_bin, &["install", "--router", &router_base])?;
+                } else {
+                    tx.send(WorkerMsg::Log("Skipping MCP client config.".to_string()))
+                        .ok();
+                }
+            }
+            WorkerAction::Uninstall => {
+                // Order: remove client configs first, then stop/disable service, then delete files.
+                if opts.configure_agents {
+                    tx.send(WorkerMsg::Log("Removing MCP client configs…".to_string()))
+                        .ok();
+                    run_agentaudio_mcp(&tx, &repo_root, &local_bin, &["uninstall"])?;
+                } else {
+                    tx.send(WorkerMsg::Log("Skipping MCP client config removal.".to_string()))
+                        .ok();
+                }
+
+                if opts.enable_router_service {
+                    tx.send(WorkerMsg::Log("Stopping/disabling router service…".to_string()))
+                        .ok();
+                    // Best-effort: disable --now may fail if not installed.
+                    let mut cmd = Command::new("systemctl");
+                    cmd.arg("--user")
+                        .arg("disable")
+                        .arg("--now")
+                        .arg("agentaudio-mcp-routerd.service");
+                    let _ = run_cmd_stream(&tx, cmd);
+
+                    let removed = remove_systemd_user_service(&tx)?;
+                    if removed {
+                        let mut cmd = Command::new("systemctl");
+                        cmd.arg("--user").arg("daemon-reload");
+                        let _ = run_cmd_stream(&tx, cmd);
+                    }
+                } else {
+                    tx.send(WorkerMsg::Log("Skipping router service removal.".to_string()))
+                        .ok();
+                }
+
+                if opts.install_binaries {
+                    tx.send(WorkerMsg::Log(format!(
+                        "Removing binaries from {} …",
+                        local_bin.display()
+                    )))
+                    .ok();
+                    let _ = remove_file_best_effort(&tx, &local_bin.join("agentaudio-mcp-routerd"));
+                    let _ = remove_file_best_effort(&tx, &local_bin.join("agentaudio-mcp-stdio"));
+                    let _ = remove_file_best_effort(&tx, &local_bin.join("agentaudio-mcp"));
+                } else {
+                    tx.send(WorkerMsg::Log("Skipping binary removal.".to_string()))
+                        .ok();
+                }
+
+                if opts.install_plugin {
+                    tx.send(WorkerMsg::Log("Removing installed VST3 bundle…".to_string()))
+                        .ok();
+                    let dir = expand_tilde(&opts.install_dir);
+                    let bundle = dir.join("AgentAudio Wrapper.vst3");
+                    remove_dir_best_effort(&tx, &bundle)?;
+                } else {
+                    tx.send(WorkerMsg::Log("Skipping VST3 bundle removal.".to_string()))
+                        .ok();
+                }
+            }
         }
 
         Ok(())
     })();
 
     let _ = tx.send(WorkerMsg::Done(res));
+}
+
+fn run_agentaudio_mcp(
+    tx: &Sender<WorkerMsg>,
+    repo_root: &Path,
+    local_bin: &Path,
+    args: &[&str],
+) -> Result<(), String> {
+    let installed = local_bin.join("agentaudio-mcp");
+    let in_repo = repo_root.join("target/release/agentaudio-mcp");
+
+    let mut cmd = if installed.exists() {
+        Command::new(installed)
+    } else {
+        Command::new(in_repo)
+    };
+    for a in args {
+        cmd.arg(a);
+    }
+    run_cmd_stream(tx, cmd)
 }
 
 fn validate_platform(tx: &Sender<WorkerMsg>) -> Result<(), String> {
@@ -416,6 +514,45 @@ fn router_bind_from_base(router_base: &str) -> Result<String, String> {
         .port_or_known_default()
         .ok_or_else(|| format!("Router base URL has no port: '{base}'"))?;
     Ok(format!("{host}:{port}"))
+}
+
+fn remove_systemd_user_service(tx: &Sender<WorkerMsg>) -> Result<bool, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+    let path = PathBuf::from(home)
+        .join(".config/systemd/user/agentaudio-mcp-routerd.service");
+    if !path.exists() {
+        tx.send(WorkerMsg::Log("systemd unit not found; skipping delete.".to_string()))
+            .ok();
+        return Ok(false);
+    }
+    fs::remove_file(&path).map_err(|e| e.to_string())?;
+    tx.send(WorkerMsg::Log(format!("Deleted systemd unit: {}", path.display())))
+        .ok();
+    Ok(true)
+}
+
+fn remove_file_best_effort(tx: &Sender<WorkerMsg>, path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        tx.send(WorkerMsg::Log(format!("Not found: {}", path.display())))
+            .ok();
+        return Ok(());
+    }
+    fs::remove_file(path).map_err(|e| e.to_string())?;
+    tx.send(WorkerMsg::Log(format!("Removed {}", path.display())))
+        .ok();
+    Ok(())
+}
+
+fn remove_dir_best_effort(tx: &Sender<WorkerMsg>, path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        tx.send(WorkerMsg::Log(format!("Not found: {}", path.display())))
+            .ok();
+        return Ok(());
+    }
+    fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+    tx.send(WorkerMsg::Log(format!("Removed {}", path.display())))
+        .ok();
+    Ok(())
 }
 
 fn run_cmd_stream(tx: &Sender<WorkerMsg>, mut cmd: Command) -> Result<(), String> {
