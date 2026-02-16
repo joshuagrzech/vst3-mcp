@@ -11,6 +11,7 @@ members = [
 
 [dependencies]
 anyhow = "1.0.101"
+eframe = "0.31"
 hound = "3.5.1"
 libloading = "0.9.0"
 rmcp = { version = "0.15.0", features = ["client", "server", "transport-io", "transport-streamable-http-client-reqwest", "macros"] }
@@ -22,6 +23,7 @@ thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+url = "2.5.8"
 vst3 = "0.3.0"
 winit = "0.30"
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
@@ -50,3 +52,7 @@ path = "src/bin/agentaudio_mcp_stdio.rs"
 [[bin]]
 name = "agentaudio-mcp"
 path = "src/bin/agentaudio_mcp.rs"
+
+[[bin]]
+name = "agentaudio-installer"
+path = "src/bin/agentaudio_installer.rs"
