@@ -10,7 +10,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use vst3_mcp_host::audio;
 use vst3_mcp_host::gui;
@@ -136,6 +136,21 @@ impl AudioHost {
 
 #[tool_router]
 impl AudioHost {
+    #[tool(description = "Unload the currently loaded plugin, closing its editor. This is called automatically by load_plugin.")]
+    fn unload_plugin(&self) -> Result<String, String> {
+        info!("unload_plugin called");
+        let was_loaded = self.unload_plugin_inner()?;
+        let response = serde_json::json!({
+            "status": if was_loaded { "unloaded" } else { "not_loaded" },
+            "message": if was_loaded {
+                "Plugin has been unloaded."
+            } else {
+                "No plugin was loaded."
+            },
+        });
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
     #[tool(description = "Scan for installed VST3 plugins and return a list with UIDs, names, vendors, and categories")]
     fn scan_plugins(
         &self,
@@ -164,6 +179,12 @@ impl AudioHost {
         Parameters(req): Parameters<LoadPluginRequest>,
     ) -> Result<String, String> {
         info!("load_plugin called with uid: {}", req.uid);
+
+        // --- UNLOAD PREVIOUS PLUGIN ---
+        // This is critical to ensure the old plugin and its editor are
+        // completely torn down before loading a new one.
+        self.unload_plugin_inner()?;
+        // --- END UNLOAD ---
 
         let sample_rate = req.sample_rate.unwrap_or(44100);
         let uid_upper = req.uid.to_uppercase();
@@ -698,22 +719,46 @@ impl AudioHost {
         };
 
         if let Some(h) = handle {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            loop {
-                if h.is_finished() {
-                    let _ = h.join();
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    info!("Editor thread didn't finish within timeout; moving on");
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+            // The editor thread MUST be joined to ensure all resources are released
+            // before we proceed to drop the plugin instance. A timeout is dangerous here,
+            // as it could leave the GUI thread running with a dangling pointer.
+            if let Err(e) = h.join() {
+                warn!("Editor thread panicked on close: {:?}", e);
             }
             true
         } else {
             false
         }
+    }
+
+    /// Internal helper to unload the current plugin and all its resources.
+    fn unload_plugin_inner(&self) -> Result<bool, String> {
+        // 1. Close the editor window and wait for its thread to terminate.
+        // This is the most critical step to prevent dangling pointers.
+        self.close_editor_inner();
+
+        // 2. Lock and take the plugin instance, causing it to be dropped.
+        let mut plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {e}"))?;
+        let was_loaded = if plugin_guard.is_some() {
+            info!("Unloading existing plugin instance.");
+            *plugin_guard = None;
+            true
+        } else {
+            false
+        };
+
+        // 3. Clear other related state.
+        if was_loaded {
+            if let Ok(mut info_guard) = self.plugin_info.lock() {
+                *info_guard = None;
+            }
+            if let Ok(mut module_guard) = self.module.lock() {
+                *module_guard = None;
+            }
+            info!("Plugin unloaded and resources released.");
+        }
+
+        Ok(was_loaded)
     }
 }
 
