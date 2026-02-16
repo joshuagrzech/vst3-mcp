@@ -15,19 +15,18 @@ cd "$REPO_ROOT"
 PROFILE="${1:-release}"
 INSTALL_DIR="${2:-}"
 BUNDLE_NAME="AgentAudio Wrapper.vst3"
-ARCH="x86_64-linux"
-CRATE="crates/agentaudio-wrapper-vst3"
+ARCH="$(uname -m)-linux"
 
 if [[ "$PROFILE" == "debug" ]]; then
-  SO="$CRATE/target/debug/libagentaudio_wrapper_vst3.so"
+  SO="target/debug/libagentaudio_wrapper_vst3.so"
 else
   PROFILE=release
-  SO="$CRATE/target/release/libagentaudio_wrapper_vst3.so"
+  SO="target/release/libagentaudio_wrapper_vst3.so"
 fi
 
 if [[ ! -f "$SO" ]]; then
   echo "Build not found: $SO"
-  echo "Run: cargo build --$PROFILE --manifest-path $CRATE/Cargo.toml"
+  echo "Run: cargo build --$PROFILE --manifest-path crates/agentaudio-wrapper-vst3/Cargo.toml"
   exit 1
 fi
 

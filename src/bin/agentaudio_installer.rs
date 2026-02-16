@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{BufRead, BufReader},
+    io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, Sender},
@@ -8,6 +8,7 @@ use std::{
 };
 
 use eframe::egui;
+use tempfile::TempDir;
 
 #[derive(Clone, Debug)]
 enum WorkerMsg {
@@ -236,18 +237,34 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
             return Err("Router base URL is empty".to_string());
         }
 
+        // Always use a fresh, isolated target dir so we build from scratch each run.
+        let temp = TempDir::new().map_err(|e| format!("Failed to create temp dir: {e}"))?;
+        let target_dir = temp.path().join("target");
+        tx.send(WorkerMsg::Log(format!(
+            "Using fresh build dir: {}",
+            target_dir.display()
+        )))
+        .ok();
+
         let local_bin = expand_tilde("~/.local/bin");
         match opts.action {
             WorkerAction::Install => {
                 if opts.install_plugin {
-                    tx.send(WorkerMsg::Log("Building + bundling VST3 wrapper…".to_string()))
+                    tx.send(WorkerMsg::Log("Building VST3 wrapper…".to_string()))
                         .ok();
-                    let mut cmd = Command::new("bash");
-                    cmd.arg("./scripts/build-and-install-vst3.sh")
-                        .arg("release")
-                        .arg(expand_tilde(&opts.install_dir))
-                        .current_dir(&repo_root);
+
+                    let mut cmd = Command::new("cargo");
+                    cmd.arg("build")
+                        .arg("--release")
+                        .arg("--manifest-path")
+                        .arg("crates/agentaudio-wrapper-vst3/Cargo.toml")
+                        .current_dir(&repo_root)
+                        .env("CARGO_TARGET_DIR", &target_dir);
                     run_cmd_stream(&tx, cmd)?;
+
+                    tx.send(WorkerMsg::Log("Bundling + installing VST3 wrapper…".to_string()))
+                        .ok();
+                    bundle_and_install_vst3_linux(&tx, &target_dir, &expand_tilde(&opts.install_dir))?;
                 } else {
                     tx.send(WorkerMsg::Log("Skipping VST3 wrapper install.".to_string()))
                         .ok();
@@ -262,7 +279,8 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
                     .arg("agentaudio-mcp-router")
                     .arg("--bin")
                     .arg("agentaudio-mcp-routerd")
-                    .current_dir(&repo_root);
+                    .current_dir(&repo_root)
+                    .env("CARGO_TARGET_DIR", &target_dir);
                 run_cmd_stream(&tx, cmd)?;
 
                 let mut cmd = Command::new("cargo");
@@ -270,7 +288,8 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
                     .arg("--release")
                     .arg("--bin")
                     .arg("agentaudio-mcp-stdio")
-                    .current_dir(&repo_root);
+                    .current_dir(&repo_root)
+                    .env("CARGO_TARGET_DIR", &target_dir);
                 run_cmd_stream(&tx, cmd)?;
 
                 let mut cmd = Command::new("cargo");
@@ -278,7 +297,8 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
                     .arg("--release")
                     .arg("--bin")
                     .arg("agentaudio-mcp")
-                    .current_dir(&repo_root);
+                    .current_dir(&repo_root)
+                    .env("CARGO_TARGET_DIR", &target_dir);
                 run_cmd_stream(&tx, cmd)?;
 
                 if opts.install_binaries {
@@ -290,9 +310,9 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
 
                     fs::create_dir_all(&local_bin).map_err(|e| e.to_string())?;
 
-                    let routerd_src = repo_root.join("target/release/agentaudio-mcp-routerd");
-                    let stdio_src = repo_root.join("target/release/agentaudio-mcp-stdio");
-                    let mcp_src = repo_root.join("target/release/agentaudio-mcp");
+                    let routerd_src = target_dir.join("release/agentaudio-mcp-routerd");
+                    let stdio_src = target_dir.join("release/agentaudio-mcp-stdio");
+                    let mcp_src = target_dir.join("release/agentaudio-mcp");
 
                     copy_executable(&tx, &routerd_src, &local_bin.join("agentaudio-mcp-routerd"))?;
                     copy_executable(&tx, &stdio_src, &local_bin.join("agentaudio-mcp-stdio"))?;
@@ -303,6 +323,21 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
                 }
 
                 if opts.enable_router_service {
+                    // The systemd unit ExecStart points at ~/.local/bin/agentaudio-mcp-routerd.
+                    // If the user didn't choose "install binaries", still ensure the daemon exists there
+                    // so the service can actually start.
+                    let routerd_dst = local_bin.join("agentaudio-mcp-routerd");
+                    if !routerd_dst.exists() {
+                        tx.send(WorkerMsg::Log(format!(
+                            "Router service enabled but {} is missing; installing routerd there…",
+                            routerd_dst.display()
+                        )))
+                        .ok();
+                        fs::create_dir_all(&local_bin).map_err(|e| e.to_string())?;
+                        let routerd_src = target_dir.join("release/agentaudio-mcp-routerd");
+                        copy_executable(&tx, &routerd_src, &routerd_dst)?;
+                    }
+
                     tx.send(WorkerMsg::Log("Configuring router systemd user service…".to_string()))
                         .ok();
                     install_systemd_user_service(&tx, &local_bin, &router_base)?;
@@ -324,7 +359,12 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
                 if opts.configure_agents {
                     tx.send(WorkerMsg::Log("Patching MCP client configs…".to_string()))
                         .ok();
-                    run_agentaudio_mcp(&tx, &repo_root, &local_bin, &["install", "--router", &router_base])?;
+                    run_agentaudio_mcp(
+                        &tx,
+                        &target_dir,
+                        &local_bin,
+                        &["install", "--router", &router_base],
+                    )?;
                 } else {
                     tx.send(WorkerMsg::Log("Skipping MCP client config.".to_string()))
                         .ok();
@@ -335,7 +375,21 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
                 if opts.configure_agents {
                     tx.send(WorkerMsg::Log("Removing MCP client configs…".to_string()))
                         .ok();
-                    run_agentaudio_mcp(&tx, &repo_root, &local_bin, &["uninstall"])?;
+                    // Build a fresh agentaudio-mcp if needed.
+                    let mcp_installed = local_bin.join("agentaudio-mcp").exists();
+                    if !mcp_installed {
+                        tx.send(WorkerMsg::Log("Building agentaudio-mcp for uninstall…".to_string()))
+                            .ok();
+                        let mut cmd = Command::new("cargo");
+                        cmd.arg("build")
+                            .arg("--release")
+                            .arg("--bin")
+                            .arg("agentaudio-mcp")
+                            .current_dir(&repo_root)
+                            .env("CARGO_TARGET_DIR", &target_dir);
+                        run_cmd_stream(&tx, cmd)?;
+                    }
+                    run_agentaudio_mcp(&tx, &target_dir, &local_bin, &["uninstall"])?;
                 } else {
                     tx.send(WorkerMsg::Log("Skipping MCP client config removal.".to_string()))
                         .ok();
@@ -398,17 +452,17 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
 
 fn run_agentaudio_mcp(
     tx: &Sender<WorkerMsg>,
-    repo_root: &Path,
+    target_dir: &Path,
     local_bin: &Path,
     args: &[&str],
 ) -> Result<(), String> {
     let installed = local_bin.join("agentaudio-mcp");
-    let in_repo = repo_root.join("target/release/agentaudio-mcp");
+    let built = target_dir.join("release/agentaudio-mcp");
 
     let mut cmd = if installed.exists() {
         Command::new(installed)
     } else {
-        Command::new(in_repo)
+        Command::new(built)
     };
     for a in args {
         cmd.arg(a);
@@ -501,6 +555,59 @@ WantedBy=default.target
         "Router base URL set to: {router_base}"
     )))
     .ok();
+    Ok(())
+}
+
+fn bundle_and_install_vst3_linux(
+    tx: &Sender<WorkerMsg>,
+    target_dir: &Path,
+    install_dir: &Path,
+) -> Result<(), String> {
+    let arch = format!("{}-linux", std::env::consts::ARCH);
+    let so = target_dir.join("release/libagentaudio_wrapper_vst3.so");
+    if !so.exists() {
+        return Err(format!(
+            "Wrapper build output not found: {}",
+            so.display()
+        ));
+    }
+
+    let bundle_name = "AgentAudio Wrapper.vst3";
+    let bundle = target_dir.join(bundle_name);
+    if bundle.exists() {
+        let _ = fs::remove_dir_all(&bundle);
+    }
+    let contents_dir = bundle.join("Contents").join(&arch);
+    fs::create_dir_all(&contents_dir).map_err(|e| e.to_string())?;
+    fs::copy(&so, contents_dir.join("AgentAudio Wrapper.so")).map_err(|e| e.to_string())?;
+    tx.send(WorkerMsg::Log(format!("Created bundle {}", bundle.display())))
+        .ok();
+
+    fs::create_dir_all(install_dir).map_err(|e| e.to_string())?;
+    let dest = install_dir.join(bundle_name);
+    if dest.exists() {
+        fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
+    }
+    copy_dir_all(&bundle, &dest).map_err(|e| e.to_string())?;
+    tx.send(WorkerMsg::Log(format!("Installed to {}", dest.display())))
+        .ok();
+
+    Ok(())
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
     Ok(())
 }
 
