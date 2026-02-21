@@ -6,10 +6,11 @@
 use std::{borrow::Cow, sync::Arc};
 
 use rmcp::{
+    ServerHandler, ServiceExt,
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::{CallToolRequestParams, CallToolResult, Content, ServerCapabilities, ServerInfo},
-    tool, tool_handler, tool_router, ServerHandler, ServiceExt,
+    tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -43,7 +44,8 @@ impl RouterStdioShim {
         tool_name: &'static str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<String, String> {
-        let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(self.router_mcp_url.clone());
+        let transport =
+            rmcp::transport::StreamableHttpClientTransport::from_uri(self.router_mcp_url.clone());
         let service = ()
             .serve(transport)
             .await
@@ -107,6 +109,26 @@ struct ProxyBatchSetRequest {
     pub changes: Vec<ParamChange>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyFindVstParameterRequest {
+    pub instance_id: Option<String>,
+    pub query: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyPreviewVstParameterValuesRequest {
+    pub instance_id: Option<String>,
+    pub ids: Option<Vec<u32>>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GuardAudioRoutingRequest {
+    pub user_message: String,
+    pub requested_tool: Option<String>,
+}
+
 #[tool_router]
 impl RouterStdioShim {
     #[tool(description = "Get router daemon status.")]
@@ -119,7 +141,9 @@ impl RouterStdioShim {
         self.call_router("list_instances", None).await
     }
 
-    #[tool(description = "Set a default instance_id for subsequent proxy calls (process-global on routerd).")]
+    #[tool(
+        description = "Set a default instance_id for subsequent proxy calls (process-global on routerd)."
+    )]
     async fn select_instance(
         &self,
         Parameters(req): Parameters<SelectInstanceRequest>,
@@ -130,7 +154,9 @@ impl RouterStdioShim {
         self.call_router("select_instance", args).await
     }
 
-    #[tool(description = "Proxy to wrapper scan_plugins via routerd.")]
+    #[tool(
+        description = "Scan installed VST plugins. Use first when user says plugin/VST/synth/preset/patch/sound/tone."
+    )]
     async fn scan_plugins(
         &self,
         Parameters(req): Parameters<ProxyScanPluginsRequest>,
@@ -141,7 +167,7 @@ impl RouterStdioShim {
         self.call_router("scan_plugins", args).await
     }
 
-    #[tool(description = "Proxy to wrapper load_child_plugin via routerd.")]
+    #[tool(description = "Load child plugin by UID after scan_plugins.")]
     async fn load_child_plugin(
         &self,
         Parameters(req): Parameters<ProxyLoadChildRequest>,
@@ -152,7 +178,18 @@ impl RouterStdioShim {
         self.call_router("load_child_plugin", args).await
     }
 
-    #[tool(description = "Proxy to wrapper unload_child_plugin via routerd.")]
+    #[tool(description = "Alias for load_child_plugin. Natural-language 'load plugin' tool name.")]
+    async fn load_plugin(
+        &self,
+        Parameters(req): Parameters<ProxyLoadChildRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({ "instance_id": req.instance_id, "uid": req.uid })
+            .as_object()
+            .cloned();
+        self.call_router("load_plugin", args).await
+    }
+
+    #[tool(description = "Unload currently loaded child plugin.")]
     async fn unload_child_plugin(
         &self,
         Parameters(req): Parameters<ProxyInstanceOnly>,
@@ -163,7 +200,7 @@ impl RouterStdioShim {
         self.call_router("unload_child_plugin", args).await
     }
 
-    #[tool(description = "Proxy to wrapper open_child_editor via routerd.")]
+    #[tool(description = "Open child plugin editor window.")]
     async fn open_child_editor(
         &self,
         Parameters(req): Parameters<ProxyInstanceOnly>,
@@ -174,7 +211,7 @@ impl RouterStdioShim {
         self.call_router("open_child_editor", args).await
     }
 
-    #[tool(description = "Proxy to wrapper close_child_editor via routerd.")]
+    #[tool(description = "Close child plugin editor window.")]
     async fn close_child_editor(
         &self,
         Parameters(req): Parameters<ProxyInstanceOnly>,
@@ -185,7 +222,7 @@ impl RouterStdioShim {
         self.call_router("close_child_editor", args).await
     }
 
-    #[tool(description = "Proxy to wrapper list_params via routerd.")]
+    #[tool(description = "List plugin parameters/knobs and current values.")]
     async fn list_params(
         &self,
         Parameters(req): Parameters<ProxyInstanceOnly>,
@@ -196,7 +233,7 @@ impl RouterStdioShim {
         self.call_router("list_params", args).await
     }
 
-    #[tool(description = "Proxy to wrapper set_param_realtime via routerd.")]
+    #[tool(description = "Set one realtime parameter value by id.")]
     async fn set_param_realtime(
         &self,
         Parameters(req): Parameters<ProxySetParamRequest>,
@@ -211,7 +248,9 @@ impl RouterStdioShim {
         self.call_router("set_param_realtime", args).await
     }
 
-    #[tool(description = "Proxy to wrapper batch_set_realtime via routerd.")]
+    #[tool(
+        description = "Set multiple realtime parameters in one call for coordinated patch/tone edits."
+    )]
     async fn batch_set_realtime(
         &self,
         Parameters(req): Parameters<ProxyBatchSetRequest>,
@@ -225,7 +264,73 @@ impl RouterStdioShim {
         self.call_router("batch_set_realtime", args).await
     }
 
-    #[tool(description = "Proxy to wrapper wrapper_status via routerd.")]
+    #[tool(
+        description = "Alias for batch_set_realtime. Edit VST patch/preset/sound via parameter changes."
+    )]
+    async fn edit_vst_patch(
+        &self,
+        Parameters(req): Parameters<ProxyBatchSetRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({
+            "instance_id": req.instance_id,
+            "changes": req.changes.into_iter().map(|c| serde_json::json!({"id": c.id, "value": c.value})).collect::<Vec<_>>()
+        })
+        .as_object()
+        .cloned();
+        self.call_router("edit_vst_patch", args).await
+    }
+
+    #[tool(
+        description = "Search plugin parameters by natural language (e.g. 'attack', 'release', 'make brighter', 'reduce reverb')."
+    )]
+    async fn find_vst_parameter(
+        &self,
+        Parameters(req): Parameters<ProxyFindVstParameterRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({
+            "instance_id": req.instance_id,
+            "query": req.query,
+            "limit": req.limit
+        })
+        .as_object()
+        .cloned();
+        self.call_router("find_vst_parameter", args).await
+    }
+
+    #[tool(
+        description = "Preview current values for selected parameters before editing patch/preset/tone. Optionally pass ids."
+    )]
+    async fn preview_vst_parameter_values(
+        &self,
+        Parameters(req): Parameters<ProxyPreviewVstParameterValuesRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({
+            "instance_id": req.instance_id,
+            "ids": req.ids,
+            "limit": req.limit
+        })
+        .as_object()
+        .cloned();
+        self.call_router("preview_vst_parameter_values", args).await
+    }
+
+    #[tool(
+        description = "Deterministic routing guardrail. Run before WebSearch; blocks web route when audio intent is high and docs/news are not explicitly requested."
+    )]
+    async fn guard_audio_routing(
+        &self,
+        Parameters(req): Parameters<GuardAudioRoutingRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({
+            "user_message": req.user_message,
+            "requested_tool": req.requested_tool
+        })
+        .as_object()
+        .cloned();
+        self.call_router("guard_audio_routing", args).await
+    }
+
+    #[tool(description = "Get wrapper status and endpoint details.")]
     async fn wrapper_status(
         &self,
         Parameters(req): Parameters<ProxyInstanceOnly>,
@@ -242,7 +347,11 @@ impl ServerHandler for RouterStdioShim {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "AgentAudio MCP stdio shim. Forwards calls to agentaudio-mcp-routerd over HTTP."
+                "AgentAudio MCP stdio shim.\n\
+Hard routing rule: If user mentions VST/plugin/preset/patch/sound/tone/parameter/knob/automation, use Audio MCP tools first. Do not use web search unless user explicitly asks for docs/news.\n\
+Disambiguation: In audio context, patch = preset/sound configuration, not code diff.\n\
+Run guard_audio_routing before any web search call.\n\
+Workflow: scan_plugins -> load_plugin -> find_vst_parameter -> preview_vst_parameter_values -> set_param_realtime/batch_set_realtime (or edit_vst_patch)."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
@@ -297,4 +406,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     service.waiting().await?;
     Ok(())
 }
-
