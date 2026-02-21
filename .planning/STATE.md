@@ -84,6 +84,7 @@ Recent decisions affecting current work:
 ### Roadmap Evolution
 
 - Phase 04.1 inserted after Phase 4: Host plugin editor window (URGENT)
+- Phase 7 added: Replace the UI library used by the VST wrapper with the modern standard for cross platform VST3 development
 
 ### Pending Todos
 
