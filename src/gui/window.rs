@@ -7,7 +7,7 @@
 use std::ffi::c_void;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::RawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use polling::{Event as PollEvent, Events, PollMode, Poller};
@@ -645,5 +645,206 @@ pub fn open_editor_window(
         .map_err(|e| format!("Event loop error: {}", e))?;
 
     info!("Editor window closed");
+    Ok(())
+}
+
+/// Persistent editor app that keeps a single winit event loop alive for
+/// repeated open/close cycles. This avoids EventLoop recreation errors.
+struct PersistentEditorApp {
+    plugin: Arc<Mutex<Option<PluginInstance>>>,
+    plugin_name: Arc<RwLock<String>>,
+    state: Option<EditorState>,
+    runloop: Arc<HostRunLoop>,
+    opened_tx: Option<std::sync::mpsc::Sender<Result<(), String>>>,
+    close_signal: Arc<std::sync::atomic::AtomicBool>,
+    is_open: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PersistentEditorApp {
+    fn new(
+        plugin: Arc<Mutex<Option<PluginInstance>>>,
+        plugin_name: Arc<RwLock<String>>,
+        runloop: Arc<HostRunLoop>,
+        opened_tx: std::sync::mpsc::Sender<Result<(), String>>,
+        close_signal: Arc<std::sync::atomic::AtomicBool>,
+        is_open: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            plugin,
+            plugin_name,
+            state: None,
+            runloop,
+            opened_tx: Some(opened_tx),
+            close_signal,
+            is_open,
+        }
+    }
+
+    fn cleanup_editor(&mut self) {
+        if self.state.take().is_some() {
+            self.is_open
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn try_open_editor(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.is_some() {
+            return;
+        }
+        if self.close_signal.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+
+        let plugin_name = self
+            .plugin_name
+            .read()
+            .ok()
+            .map(|n| n.clone())
+            .unwrap_or_else(|| "Unknown Plugin".to_string());
+
+        match create_editor_state(
+            event_loop,
+            &self.plugin,
+            &plugin_name,
+            Arc::clone(&self.runloop),
+        ) {
+            Ok(state) => {
+                self.state = Some(state);
+                self.is_open
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(tx) = self.opened_tx.take() {
+                    let _ = tx.send(Ok(()));
+                }
+            }
+            Err(e) => {
+                error!("Failed to create editor window: {}", e);
+                // Stop retrying until the host explicitly re-requests open.
+                self.close_signal
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(tx) = self.opened_tx.take() {
+                    let _ = tx.send(Err(e));
+                }
+            }
+        }
+    }
+}
+
+impl ApplicationHandler for PersistentEditorApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.try_open_editor(event_loop);
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        match event {
+            WindowEvent::CloseRequested => {
+                self.cleanup_editor();
+                self.close_signal
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            WindowEvent::Focused(focused) => {
+                if let Some(state) = &self.state {
+                    if let Some(plugin_wid) = state.plugin_window_id {
+                        if focused {
+                            let _ = xembed::send_window_activate(
+                                &state.x11_conn,
+                                &state.xembed_atoms,
+                                plugin_wid,
+                            );
+                            let _ = xembed::send_focus_in(
+                                &state.x11_conn,
+                                &state.xembed_atoms,
+                                plugin_wid,
+                            );
+                        } else {
+                            let _ = xembed::send_focus_out(
+                                &state.x11_conn,
+                                &state.xembed_atoms,
+                                plugin_wid,
+                            );
+                            let _ = xembed::send_window_deactivate(
+                                &state.x11_conn,
+                                &state.xembed_atoms,
+                                plugin_wid,
+                            );
+                        }
+                    }
+                }
+            }
+            WindowEvent::Resized(_size) => {}
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.close_signal.load(std::sync::atomic::Ordering::Relaxed) {
+            if self.state.is_some() {
+                self.cleanup_editor();
+            }
+        } else if self.state.is_none() {
+            self.try_open_editor(event_loop);
+        }
+
+        let Some(state) = &mut self.state else {
+            return;
+        };
+
+        apply_pending_resize(state);
+        poll_x11_events(state);
+        state.runloop.dispatch_timers();
+        poll_and_dispatch_fds(state);
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.cleanup_editor();
+    }
+}
+
+/// Open and maintain a persistent editor event loop on this thread.
+///
+/// The first open result is reported through `opened_tx`. Future open/close
+/// requests are controlled by toggling `close_signal` and updating
+/// `plugin_name`.
+pub fn open_editor_window_persistent(
+    plugin: Arc<Mutex<Option<PluginInstance>>>,
+    plugin_name: Arc<RwLock<String>>,
+    opened_tx: std::sync::mpsc::Sender<Result<(), String>>,
+    close_signal: Arc<std::sync::atomic::AtomicBool>,
+    is_open: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    info!("Starting persistent editor event loop");
+    let runloop = Arc::new(HostRunLoop::new());
+
+    let mut builder = EventLoop::builder();
+
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        builder.with_x11().with_any_thread(true);
+    }
+
+    let event_loop = builder
+        .build()
+        .map_err(|e| format!("Failed to create event loop: {}", e))?;
+
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut app = PersistentEditorApp::new(
+        plugin,
+        plugin_name,
+        runloop,
+        opened_tx,
+        close_signal,
+        is_open,
+    );
+
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| format!("Event loop error: {}", e))?;
+
     Ok(())
 }

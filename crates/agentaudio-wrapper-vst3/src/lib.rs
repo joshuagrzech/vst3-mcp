@@ -87,10 +87,22 @@ struct QueuedParamChange {
     enqueued_at_ms: u64,
 }
 
-#[derive(Default)]
 struct EditorRuntime {
     close_signal: Arc<AtomicBool>,
+    is_open: Arc<AtomicBool>,
+    plugin_name: Arc<RwLock<String>>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Default for EditorRuntime {
+    fn default() -> Self {
+        Self {
+            close_signal: Arc::new(AtomicBool::new(true)),
+            is_open: Arc::new(AtomicBool::new(false)),
+            plugin_name: Arc::new(RwLock::new(String::new())),
+            thread: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -167,17 +179,30 @@ impl SharedState {
     }
 
     fn close_editor(&self) -> bool {
-        let mut editor = match self.editor_runtime.lock() {
-            Ok(guard) => guard,
+        let (close_signal, is_open, has_thread, was_open) = match self.editor_runtime.lock() {
+            Ok(editor) => (
+                Arc::clone(&editor.close_signal),
+                Arc::clone(&editor.is_open),
+                editor.thread.is_some(),
+                editor.is_open.load(Ordering::Relaxed),
+            ),
             Err(_) => return false,
         };
-        editor.close_signal.store(true, Ordering::Relaxed);
-        if let Some(handle) = editor.thread.take() {
-            let _ = handle.join();
-            true
-        } else {
-            false
+
+        if !has_thread {
+            return false;
         }
+
+        close_signal.store(true, Ordering::Relaxed);
+
+        for _ in 0..200 {
+            if !is_open.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        was_open
     }
 
     fn open_editor(&self) -> Result<(), String> {
@@ -189,39 +214,102 @@ impl SharedState {
             .map(|p| p.name.clone())
             .ok_or_else(|| "No child plugin loaded".to_string())?;
 
-        self.close_editor();
+        // If the persistent editor thread is already running, re-open using the existing loop.
+        {
+            let editor = self
+                .editor_runtime
+                .lock()
+                .map_err(|e| format!("Lock error: {e}"))?;
+            if let Some(handle) = editor.thread.as_ref() {
+                if handle.is_finished() {
+                    return Err("Editor event loop stopped unexpectedly; reload the wrapper to recover".to_string());
+                }
 
+                if let Ok(mut name) = editor.plugin_name.write() {
+                    *name = plugin_name.clone();
+                }
+                let was_open = editor.is_open.load(Ordering::Relaxed);
+                editor.close_signal.store(false, Ordering::Relaxed);
+                if was_open {
+                    return Ok(());
+                }
+            } else {
+                drop(editor);
+                return self.start_editor_thread(plugin_name);
+            }
+        }
+
+        // Wait for the persistent loop to create the window for this open request.
+        for _ in 0..500 {
+            let is_open = self
+                .editor_runtime
+                .lock()
+                .map(|e| e.is_open.load(Ordering::Relaxed))
+                .unwrap_or(false);
+            if is_open {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        Err("Timed out waiting for editor window to open".to_string())
+    }
+
+    fn start_editor_thread(&self, plugin_name: String) -> Result<(), String> {
         let plugin_arc = Arc::clone(&self.child_plugin);
-        let close_signal = Arc::new(AtomicBool::new(false));
-        let close_signal_clone = Arc::clone(&close_signal);
         let (opened_tx, opened_rx) = std::sync::mpsc::channel();
-        let opened_tx_clone = opened_tx.clone();
+
+        let (close_signal, is_open, name_arc) = {
+            let editor = self
+                .editor_runtime
+                .lock()
+                .map_err(|e| format!("Lock error: {e}"))?;
+
+            if let Some(handle) = editor.thread.as_ref() {
+                if !handle.is_finished() {
+                    if let Ok(mut name) = editor.plugin_name.write() {
+                        *name = plugin_name;
+                    }
+                    editor.close_signal.store(false, Ordering::Relaxed);
+                    return Ok(());
+                }
+            }
+
+            if let Ok(mut name) = editor.plugin_name.write() {
+                *name = plugin_name;
+            }
+            editor.close_signal.store(false, Ordering::Relaxed);
+            editor.is_open.store(false, Ordering::Relaxed);
+
+            (
+                Arc::clone(&editor.close_signal),
+                Arc::clone(&editor.is_open),
+                Arc::clone(&editor.plugin_name),
+            )
+        };
 
         let handle = std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                gui::open_editor_window(
+                gui::open_editor_window_persistent(
                     plugin_arc,
-                    plugin_name,
-                    opened_tx_clone,
-                    close_signal_clone,
+                    name_arc,
+                    opened_tx,
+                    close_signal,
+                    is_open,
                 )
             }));
 
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    let _ = opened_tx.send(Err(format!("Editor error: {e}")));
-                }
-                Err(payload) => {
-                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-                        (*s).to_string()
-                    } else if let Some(s) = payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "non-string panic payload".to_string()
-                    };
-                    let _ = opened_tx.send(Err(format!("GUI thread panicked: {msg}")));
-                }
+            if let Ok(Err(e)) = result {
+                nih_log!("Persistent editor loop error: {e}");
+            } else if let Err(payload) = result {
+                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "non-string panic payload".to_string()
+                };
+                nih_log!("Persistent editor loop panicked: {msg}");
             }
         });
 
@@ -230,22 +318,16 @@ impl SharedState {
                 .editor_runtime
                 .lock()
                 .map_err(|e| format!("Lock error: {e}"))?;
-            editor.close_signal = close_signal;
             editor.thread = Some(handle);
         }
 
         match opened_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => {
-                let _ = self.close_editor();
-                Err(e)
-            }
+            Ok(Err(e)) => Err(e),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let _ = self.close_editor();
                 Err("Timed out waiting for editor window to open".to_string())
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = self.close_editor();
                 Err("Editor thread exited before reporting open state".to_string())
             }
         }

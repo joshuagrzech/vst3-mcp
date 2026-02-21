@@ -10,3 +10,4 @@ pub mod window;
 pub mod xembed;
 
 pub use window::open_editor_window;
+pub use window::open_editor_window_persistent;
