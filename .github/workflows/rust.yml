@@ -11,12 +11,37 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v4
     - name: Build
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+
+  release:
+    name: Create Release
+    needs: build
+    # Only run this job if the event is a push/merge to master
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    
+    # Explicitly grant the GITHUB_TOKEN permissions needed to create a release
+    permissions:
+      contents: write 
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build Release Binary
+      run: cargo build --release --verbose
+      
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        # Uses the commit SHA to create a unique tag (e.g., release-a1b2c3d)
+        tag_name: release-${{ github.sha }}
+        name: Release ${{ github.sha }}
+        generate_release_notes: true
+        # TODO: Replace YOUR_BINARY_NAME with the actual name of your compiled executable
+        files: target/release/*
