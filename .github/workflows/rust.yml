@@ -32,19 +32,25 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    
+      with:
+        fetch-depth: 0
+
+    - name: Set short SHA
+      run: echo "GIT_SHA_SHORT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
     - name: Install system dependencies
       run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libx11-dev
       
-    - name: Build Release Binary
-      run: ./scripts/master-release-installer.sh
-      
+    - name: Build Release Bundle
+      run: ./scripts/master-release-installer.sh "${{ github.workspace }}/dist"
+
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        # Uses the commit SHA to create a unique tag (e.g., release-a1b2c3d)
         tag_name: release-${{ github.sha }}
-        name: Release ${{ github.sha }}
+        name: Release ${{ env.GIT_SHA_SHORT }}
         generate_release_notes: true
-        # TODO: Replace YOUR_BINARY_NAME with the actual name of your compiled executable
-        files: target/release/*
+        # Upload the installer bundle from master-release-installer.sh (tarball + checksum)
+        files: |
+          dist/*.tar.gz
+          dist/*.sha256
