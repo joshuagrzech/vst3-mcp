@@ -90,7 +90,6 @@ struct QueuedParamChange {
 struct EditorRuntime {
     close_signal: Arc<AtomicBool>,
     is_open: Arc<AtomicBool>,
-    exit_signal: Arc<AtomicBool>,
     plugin_name: Arc<RwLock<String>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -100,18 +99,8 @@ impl Default for EditorRuntime {
         Self {
             close_signal: Arc::new(AtomicBool::new(true)),
             is_open: Arc::new(AtomicBool::new(false)),
-            exit_signal: Arc::new(AtomicBool::new(false)),
             plugin_name: Arc::new(RwLock::new(String::new())),
             thread: None,
-        }
-    }
-}
-
-impl Drop for EditorRuntime {
-    fn drop(&mut self) {
-        self.exit_signal.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.thread.take() {
-            let _ = handle.join();
         }
     }
 }
@@ -119,7 +108,6 @@ impl Drop for EditorRuntime {
 #[derive(Clone)]
 struct SharedState {
     instance_id: Arc<String>,
-    editor_runtime: Arc<Mutex<EditorRuntime>>,
     child_plugin: Arc<Mutex<Option<PluginInstance>>>,
     loaded_info: Arc<RwLock<Option<PluginInfo>>>,
     scan_cache: Arc<Mutex<Vec<PluginInfo>>>,
@@ -127,13 +115,13 @@ struct SharedState {
     max_block_size: Arc<RwLock<i32>>,
     endpoint: Arc<RwLock<Option<String>>>,
     param_queue: Arc<ArrayQueue<QueuedParamChange>>,
+    editor_runtime: Arc<Mutex<EditorRuntime>>,
 }
 
 impl SharedState {
     fn new() -> Self {
         Self {
             instance_id: Arc::new(Uuid::new_v4().to_string()),
-            editor_runtime: Arc::new(Mutex::new(EditorRuntime::default())),
             child_plugin: Arc::new(Mutex::new(None)),
             loaded_info: Arc::new(RwLock::new(None)),
             scan_cache: Arc::new(Mutex::new(Vec::new())),
@@ -141,6 +129,7 @@ impl SharedState {
             max_block_size: Arc::new(RwLock::new(1024)),
             endpoint: Arc::new(RwLock::new(None)),
             param_queue: Arc::new(ArrayQueue::new(PARAM_QUEUE_CAPACITY)),
+            editor_runtime: Arc::new(Mutex::new(EditorRuntime::default())),
         }
     }
 
@@ -273,7 +262,7 @@ impl SharedState {
         let plugin_arc = Arc::clone(&self.child_plugin);
         let (opened_tx, opened_rx) = std::sync::mpsc::channel();
 
-        let (close_signal, is_open, exit_signal, name_arc) = {
+        let (close_signal, is_open, name_arc) = {
             let editor = self
                 .editor_runtime
                 .lock()
@@ -294,12 +283,10 @@ impl SharedState {
             }
             editor.close_signal.store(false, Ordering::Relaxed);
             editor.is_open.store(false, Ordering::Relaxed);
-            editor.exit_signal.store(false, Ordering::Relaxed);
 
             (
                 Arc::clone(&editor.close_signal),
                 Arc::clone(&editor.is_open),
-                Arc::clone(&editor.exit_signal),
                 Arc::clone(&editor.plugin_name),
             )
         };
@@ -312,7 +299,6 @@ impl SharedState {
                     opened_tx,
                     close_signal,
                     is_open,
-                    exit_signal,
                 )
             }));
 
@@ -547,6 +533,8 @@ struct SetParamByNameRequest {
 
 #[derive(Default)]
 struct GuiState {
+    /// User-entered path to a .vst3 bundle (e.g. /usr/lib/vst3/MyPlugin.vst3 or ~/.vst3/Synth.vst3)
+    plugin_path: String,
     message: String,
     /// Path buffer for loading a .vst3 bundle (drag-drop is not supported by the plugin host UI backend).
     path_to_load: String,
@@ -1248,7 +1236,7 @@ impl Plugin for AgentAudioWrapper {
             (),
             |_, _| {},
             move |ctx, _setter, _state| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::Window::new("AgentAudio Wrapper").show(ctx, |ui| {
                     ui.label(format!("Instance: {}", shared.instance_id));
                     ui.label(format!("MCP Name: {}", shared.mcp_name()));
                     ui.monospace(
@@ -1258,86 +1246,79 @@ impl Plugin for AgentAudioWrapper {
                     );
                     ui.separator();
 
-                    ui.label("Load .vst3 bundle:");
-                    let mut path_to_load = gui_state
-                        .lock()
-                        .ok()
-                        .map(|g| g.path_to_load.clone())
-                        .unwrap_or_default();
-                    let path_id = egui::Id::new("vst3_path");
-                    let load_clicked = ui
-                        .horizontal(|ui| {
-                            let path_response = ui.add(
-                                egui::TextEdit::singleline(&mut path_to_load)
-                                    .hint_text("/path/to/Plugin.vst3")
-                                    .id(path_id)
-                                    .min_size(egui::vec2(280.0, 0.0)),
-                            );
-                            if path_response.changed() {
-                                if let Ok(mut gs) = gui_state.lock() {
-                                    gs.path_to_load = path_to_load.clone();
-                                }
-                            }
-                            ui.button("Load").clicked()
-                        })
-                        .inner;
-                    if load_clicked {
-                        let path = path_to_load.trim();
-                        if path.is_empty() {
+                    ui.label("VST3 bundle path (e.g. ~/.vst3/MyPlugin.vst3):");
+                    {
+                        let mut path = gui_state
+                            .lock()
+                            .ok()
+                            .map(|gs| gs.plugin_path.clone())
+                            .unwrap_or_default();
+                        if ui.text_edit_singleline(&mut path).changed() {
                             if let Ok(mut gs) = gui_state.lock() {
-                                gs.message = "Enter a path to a .vst3 bundle".to_string();
-                            }
-                        } else if !path.ends_with(".vst3") {
-                            if let Ok(mut gs) = gui_state.lock() {
-                                gs.message = "Path must end with .vst3".to_string();
-                            }
-                        } else {
-                            match shared.load_child_plugin_by_path(path) {
-                                Ok(info) => {
-                                    let _ = shared.open_editor();
-                                    if let Ok(mut gs) = gui_state.lock() {
-                                        gs.message = format!("Loaded {}", info.name);
-                                        gs.path_to_load.clear();
-                                    }
-                                }
-                                Err(e) => {
-                                    if let Ok(mut gs) = gui_state.lock() {
-                                        gs.message = format!("Load failed: {e}");
-                                    }
-                                }
+                                gs.plugin_path = path;
                             }
                         }
                     }
 
-                    // Keep drop handling for backends that may support it in the future
-                    if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
-                        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
-                        for file in dropped_files {
-                            if let Some(path_buf) = file.path {
-                                let path_str = path_buf.to_string_lossy().to_string();
-                                if path_str.ends_with(".vst3") {
-                                    match shared.load_child_plugin_by_path(&path_str) {
-                                        Ok(info) => {
-                                            let _ = shared.open_editor();
-                                            if let Ok(mut gs) = gui_state.lock() {
-                                                gs.message = format!("Loaded {}", info.name);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            if let Ok(mut gs) = gui_state.lock() {
-                                                gs.message = format!("Load failed: {e}");
-                                            }
-                                        }
+                    let path = gui_state.lock().ok().and_then(|gs| {
+                        let p = gs.plugin_path.trim();
+                        if p.is_empty() {
+                            None
+                        } else {
+                            Some(p.to_string())
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Load from path").clicked() {
+                            let msg = if let Some(p) = path {
+                                let expanded = expand_tilde(&p);
+                                match shared.load_child_plugin_by_path(&expanded) {
+                                    Ok(info) => {
+                                        let _ = shared.open_editor();
+                                        format!("Loaded {}", info.name)
                                     }
-                                } else {
-                                    if let Ok(mut gs) = gui_state.lock() {
-                                        gs.message =
-                                            "Dropped file must be a .vst3 bundle".to_string();
-                                    }
+                                    Err(e) => format!("Load failed: {e}"),
                                 }
+                            } else {
+                                "Enter a path to a .vst3 bundle".to_string()
+                            };
+                            if let Ok(mut gs) = gui_state.lock() {
+                                gs.message = msg;
                             }
                         }
-                    }
+                        if ui.button("Unload Child").clicked() {
+                            let msg = match shared.unload_child_plugin() {
+                                Ok(()) => "Child plugin unloaded".to_string(),
+                                Err(e) => format!("Unload failed: {e}"),
+                            };
+                            if let Ok(mut gs) = gui_state.lock() {
+                                gs.message = msg;
+                            }
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Open Child Editor").clicked() {
+                            let msg = match shared.open_editor() {
+                                Ok(()) => "Editor opened".to_string(),
+                                Err(e) => format!("Open editor failed: {e}"),
+                            };
+                            if let Ok(mut gs) = gui_state.lock() {
+                                gs.message = msg;
+                            }
+                        }
+                        if ui.button("Close Child Editor").clicked() {
+                            let closed = shared.close_editor();
+                            if let Ok(mut gs) = gui_state.lock() {
+                                gs.message = if closed {
+                                    "Editor closed".to_string()
+                                } else {
+                                    "Editor was not open".to_string()
+                                };
+                            }
+                        }
+                    });
 
                     if let Some(loaded) = shared.loaded_info.read().ok().and_then(|v| v.clone()) {
                         ui.label(format!("Loaded: {} ({})", loaded.name, loaded.vendor));

@@ -886,7 +886,6 @@ struct PersistentEditorApp {
     opened_tx: Option<std::sync::mpsc::Sender<Result<(), String>>>,
     close_signal: Arc<std::sync::atomic::AtomicBool>,
     is_open: Arc<std::sync::atomic::AtomicBool>,
-    exit_signal: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PersistentEditorApp {
@@ -897,7 +896,6 @@ impl PersistentEditorApp {
         opened_tx: std::sync::mpsc::Sender<Result<(), String>>,
         close_signal: Arc<std::sync::atomic::AtomicBool>,
         is_open: Arc<std::sync::atomic::AtomicBool>,
-        exit_signal: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             plugin,
@@ -907,7 +905,6 @@ impl PersistentEditorApp {
             opened_tx: Some(opened_tx),
             close_signal,
             is_open,
-            exit_signal,
         }
     }
 
@@ -992,14 +989,6 @@ impl ApplicationHandler for PersistentEditorApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Check for thread exit signal
-        if self.exit_signal.load(std::sync::atomic::Ordering::Relaxed) {
-            info!("Received exit signal, stopping editor loop");
-            self.cleanup_editor();
-            event_loop.exit();
-            return;
-        }
-
         if self.close_signal.load(std::sync::atomic::Ordering::Relaxed) {
             if self.state.is_some() {
                 self.cleanup_editor();
@@ -1034,7 +1023,6 @@ pub fn open_editor_window_persistent(
     opened_tx: std::sync::mpsc::Sender<Result<(), String>>,
     close_signal: Arc<std::sync::atomic::AtomicBool>,
     is_open: Arc<std::sync::atomic::AtomicBool>,
-    exit_signal: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
     info!("Starting persistent editor event loop");
     let runloop = Arc::new(HostRunLoop::new());
@@ -1060,7 +1048,6 @@ pub fn open_editor_window_persistent(
         opened_tx,
         close_signal,
         is_open,
-        exit_signal,
     );
 
     event_loop
