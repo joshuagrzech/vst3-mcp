@@ -1,5 +1,5 @@
 # VST3 MCP Host + AgentAudio Wrapper
-
+[![Rust](https://github.com/joshuagrzech/vst3-mcp/actions/workflows/rust.yml/badge.svg)](https://github.com/joshuagrzech/vst3-mcp/actions/workflows/rust.yml)
 This repository now contains two related runtimes for AI-driven VST3 control:
 
 1. **`vst3-mcp-host`**: a headless offline host (stdio MCP transport).
