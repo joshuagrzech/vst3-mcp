@@ -142,3 +142,13 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 4. MCP Server & Tools | 0/1 | Not started | - |
 | 5. Focus Mode | 0/TBD | Not started | - |
 | 6. State Management | 0/TBD | Not started | - |
+
+### Phase 7: Replace the UI library used by the VST wrapper with the modern standard for cross platform VST3 development
+
+**Goal:** Replace `nih_plug_egui` with `nih_plug_vizia` to modernize the wrapper UI and align with nih-plug standards.
+**Depends on:** Phase 6
+**Plans:** 2 plans
+
+Plans:
+- [ ] 07-01-PLAN.md — Migrate dependencies and establish Vizia data structures
+- [ ] 07-02-PLAN.md — Re-implement wrapper UI layout using Vizia widgets

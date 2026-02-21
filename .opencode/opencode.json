@@ -1,0 +1,10 @@
+{
+  "permission": {
+    "read": {
+      "/home/josh/Developer/vst3-mcp/.opencode/get-shit-done/*": "allow"
+    },
+    "external_directory": {
+      "/home/josh/Developer/vst3-mcp/.opencode/get-shit-done/*": "allow"
+    }
+  }
+}
