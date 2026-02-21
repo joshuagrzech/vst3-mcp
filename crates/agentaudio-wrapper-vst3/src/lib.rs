@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crossbeam_queue::ArrayQueue;
 use nih_plug::prelude::*;
 use nih_plug_vizia::{ViziaState, ViziaTheming, create_vizia_editor, vizia::prelude::*};
+use nih_plug_vizia::widgets::ResizeHandle;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
@@ -116,6 +117,18 @@ struct SharedState {
     endpoint: Arc<RwLock<Option<String>>>,
     param_queue: Arc<ArrayQueue<QueuedParamChange>>,
     editor_runtime: Arc<Mutex<EditorRuntime>>,
+}
+
+impl PartialEq for SharedState {
+    fn eq(&self, other: &Self) -> bool {
+        self.instance_id == other.instance_id
+    }
+}
+
+impl Data for SharedState {
+    fn same(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 impl SharedState {
@@ -538,13 +551,27 @@ struct GuiState {
     message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AppEvent {
+    Update,
+}
+
 #[derive(Lens, Clone)]
 struct EditorData {
     shared: SharedState,
     gui_state: Arc<Mutex<GuiState>>,
+    update_counter: u32,
 }
 
-impl Model for EditorData {}
+impl Model for EditorData {
+    fn event(&mut self, _cx: &mut EventContext, event: &mut Event) {
+        event.map(|e, _| match e {
+            AppEvent::Update => {
+                self.update_counter = self.update_counter.wrapping_add(1);
+            }
+        });
+    }
+}
 
 struct WrapperMcpServer {
     shared: SharedState,
@@ -1237,8 +1264,9 @@ impl Plugin for AgentAudioWrapper {
         let shared = self.shared.clone();
         let gui_state = Arc::clone(&self.gui_state);
         let data = EditorData {
-            shared,
-            gui_state,
+            shared: shared.clone(),
+            gui_state: gui_state.clone(),
+            update_counter: 0,
         };
 
         create_vizia_editor(
@@ -1248,8 +1276,132 @@ impl Plugin for AgentAudioWrapper {
                 data.clone().build(cx);
                 
                 VStack::new(cx, |cx| {
-                    Label::new(cx, "Migration in progress...");
-                });
+                    // Header
+                    Label::new(cx, "AgentAudio VST3 Wrapper")
+                        .font_size(18.0)
+                        .class("header");
+
+                    // Info
+                    VStack::new(cx, |cx| {
+                        Label::new(cx, EditorData::shared.map(|s| format!("Instance ID: {}", s.instance_id)));
+                        Label::new(cx, EditorData::shared.map(|s| format!("MCP Name: {}", s.mcp_name())));
+                        Label::new(cx, EditorData::shared.map(|s| format!("Endpoint: {}", s.endpoint().unwrap_or_default())));
+                    })
+                    .row_between(Pixels(5.0));
+
+                    // Plugin Load Controls
+                    HStack::new(cx, |cx| {
+                        Label::new(cx, "Plugin Path:").width(Pixels(80.0));
+                        
+                        let gui_state_edit = data.gui_state.clone();
+                        Textbox::new(cx, EditorData::gui_state.map(|s| {
+                            s.lock().map(|g| g.plugin_path.clone()).unwrap_or_default()
+                        }))
+                        .on_edit(move |_cx, text| {
+                            if let Ok(mut g) = gui_state_edit.lock() {
+                                g.plugin_path = text;
+                            }
+                        })
+                        .width(Units::Stretch(1.0));
+                    })
+                    .height(Pixels(30.0))
+                    .col_between(Pixels(10.0));
+
+                    HStack::new(cx, |cx| {
+                        let shared_load = shared.clone();
+                        let gui_state_load = data.gui_state.clone();
+                        Button::new(cx, move |cx| {
+                            let path = if let Ok(g) = gui_state_load.lock() {
+                                g.plugin_path.clone()
+                            } else {
+                                return;
+                            };
+                            let expanded = expand_tilde(&path);
+                            match shared_load.load_child_plugin_by_path(&expanded) {
+                                Ok(_) => {
+                                    if let Ok(mut g) = gui_state_load.lock() {
+                                        g.message = format!("Loaded plugin: {}", path);
+                                    }
+                                    println!("Loaded plugin");
+                                },
+                                Err(e) => {
+                                    if let Ok(mut g) = gui_state_load.lock() {
+                                        g.message = format!("Failed to load: {}", e);
+                                    }
+                                    eprintln!("Failed to load: {}", e);
+                                },
+                            }
+                            cx.emit(AppEvent::Update);
+                        }, |cx| Label::new(cx, "Load"));
+
+                        let shared_unload = shared.clone();
+                        let gui_state_unload = data.gui_state.clone();
+                        Button::new(cx, move |cx| {
+                            let _ = shared_unload.unload_child_plugin();
+                            if let Ok(mut g) = gui_state_unload.lock() {
+                                g.message = "Plugin unloaded".to_string();
+                            }
+                            cx.emit(AppEvent::Update);
+                        }, |cx| Label::new(cx, "Unload"));
+                    })
+                    .height(Pixels(30.0))
+                    .col_between(Pixels(10.0));
+
+                    // Editor Controls
+                    HStack::new(cx, |cx| {
+                        let shared_open = shared.clone();
+                        let gui_state_open = data.gui_state.clone();
+                        Button::new(cx, move |_cx| {
+                            match shared_open.open_editor() {
+                                Ok(_) => {
+                                    if let Ok(mut g) = gui_state_open.lock() {
+                                        g.message = "Editor opened".to_string();
+                                    }
+                                },
+                                Err(e) => {
+                                    if let Ok(mut g) = gui_state_open.lock() {
+                                        g.message = format!("Failed to open editor: {}", e);
+                                    }
+                                },
+                            }
+                        }, |cx| Label::new(cx, "Open Editor"));
+
+                        let shared_close = shared.clone();
+                        let gui_state_close = data.gui_state.clone();
+                        Button::new(cx, move |_cx| {
+                            let closed = shared_close.close_editor();
+                            if let Ok(mut g) = gui_state_close.lock() {
+                                g.message = if closed {
+                                    "Editor closed".to_string()
+                                } else {
+                                    "Editor not open".to_string()
+                                };
+                            }
+                        }, |cx| Label::new(cx, "Close Editor"));
+                    })
+                    .height(Pixels(30.0))
+                    .col_between(Pixels(10.0));
+
+                    // Status
+                    VStack::new(cx, |cx| {
+                         Label::new(cx, EditorData::shared.map(|s| {
+                             s.loaded_info.read().ok().and_then(|guard| (*guard).clone())
+                                .map(|i| format!("Loaded: {} ({})", i.name, i.vendor))
+                                .unwrap_or_else(|| "No plugin loaded".to_string())
+                        }));
+                        Label::new(cx, EditorData::gui_state.map(|s| {
+                            s.lock().map(|g| format!("Message: {}", g.message)).unwrap_or_else(|_| "Message: <error>".to_string())
+                        }));
+                        Label::new(cx, EditorData::shared.map(|s| {
+                             format!("Queue Size: {}", s.param_queue.len())
+                        }));
+                    })
+                    .row_between(Pixels(5.0));
+
+                    ResizeHandle::new(cx);
+                })
+                .row_between(Pixels(10.0))
+                .child_space(Pixels(10.0));
             },
         )
     }
