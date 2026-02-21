@@ -880,6 +880,7 @@ impl PluginInstance {
                 default_normalized: info.defaultNormalizedValue,
                 step_count: info.stepCount,
                 flags: info.flags as u32,
+                step_labels: None,
             })
         }
     }
@@ -917,8 +918,14 @@ impl PluginInstance {
     /// Get the human-readable display string for a specific parameter value.
     ///
     /// Does not change the plugin state. Useful for probing values.
-    pub fn get_parameter_display_for_value(&self, id: u32, value: f64) -> Result<String, HostError> {
-        let ctrl = self.controller.as_ref()
+    pub fn get_parameter_display_for_value(
+        &self,
+        id: u32,
+        value: f64,
+    ) -> Result<String, HostError> {
+        let ctrl = self
+            .controller
+            .as_ref()
             .ok_or_else(|| HostError::InvalidState("no edit controller available".to_string()))?;
 
         unsafe {
@@ -932,6 +939,41 @@ impl PluginInstance {
                 Ok(format!("{:.3}", value))
             }
         }
+    }
+
+    /// Get step labels for a discrete parameter.
+    ///
+    /// If step_count > 0, iterates through all steps and fetches their display strings.
+    /// This can be slow for large step counts, so use sparingly (e.g. only for get_param_info).
+    pub fn get_parameter_step_labels(
+        &self,
+        id: u32,
+        step_count: i32,
+    ) -> Result<Vec<String>, HostError> {
+        if step_count <= 0 {
+            return Ok(Vec::new());
+        }
+
+        // Limit to reasonable number to prevent massive hangs
+        let count = step_count.min(256);
+        let mut labels = Vec::with_capacity(count as usize);
+
+        for i in 0..=count {
+            let value = i as f64 / step_count as f64;
+            // Clamp to 1.0 just in case
+            let value = value.min(1.0);
+
+            // For the last step (value 1.0), we want the max value.
+            // step_count is the number of intervals, so values are 0/N, 1/N, ..., N/N.
+            // Wait, VST3 spec says stepCount is number of steps (excluding the 0th?).
+            // Actually, stepCount is number of discrete steps.
+            // If stepCount = 1, we have 2 states (0.0 and 1.0).
+            // So we iterate 0..=stepCount.
+
+            labels.push(self.get_parameter_display_for_value(id, value)?);
+        }
+
+        Ok(labels)
     }
 
     /// Get the tail length in samples reported by the plugin.

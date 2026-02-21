@@ -11,8 +11,8 @@ const MAX_EXCERPT_CHARS: usize = 550;
 
 const STOPWORDS: [&str; 31] = [
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "in", "into", "is",
-    "it", "of", "on", "or", "that", "the", "their", "there", "these", "this", "to", "use",
-    "using", "what", "with", "you", "your",
+    "it", "of", "on", "or", "that", "the", "their", "there", "these", "this", "to", "use", "using",
+    "what", "with", "you", "your",
 ];
 
 #[derive(Debug, Clone)]
@@ -193,7 +193,10 @@ fn select_plugin_doc_files(files: &[PathBuf], plugin_name: &str) -> Vec<PathBuf>
     files
         .iter()
         .filter(|path| {
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
             let stem_key = normalize_ascii_alnum(stem);
             if stem_key.contains(&plugin_key) || plugin_key.contains(&stem_key) {
                 return true;
@@ -211,11 +214,28 @@ fn score_files(files: &[PathBuf], terms: &[String]) -> Result<Vec<ScoredExcerpt>
     for file in files {
         let text = read_doc_text(file)?;
         let source = relative_display_path(file);
+
+        // Check for tags
+        let tags = extract_tags(&text);
+        let tag_boost = if !tags.is_empty() && !terms.is_empty() {
+            let mut boost = 0;
+            for term in terms {
+                if tags.iter().any(|t| t.contains(term)) {
+                    boost += 500; // Large boost for tag match
+                }
+            }
+            boost
+        } else {
+            0
+        };
+
         for chunk in split_into_chunks(&text) {
-            let score = score_chunk(&chunk, terms);
-            if score == 0 {
+            let mut score = score_chunk(&chunk, terms);
+            if score == 0 && tag_boost == 0 {
                 continue;
             }
+            score += tag_boost;
+
             scored.push(ScoredExcerpt {
                 source: source.clone(),
                 score,
@@ -232,6 +252,24 @@ fn score_files(files: &[PathBuf], terms: &[String]) -> Result<Vec<ScoredExcerpt>
     });
     scored.dedup_by(|a, b| a.source == b.source && a.text == b.text);
     Ok(scored)
+}
+
+fn extract_tags(text: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    // Look for "Tags: a, b, c" or "<!-- tags: a, b, c -->"
+    for line in text.lines().take(20) {
+        // Check header area
+        let lower = line.to_lowercase();
+        if let Some(rest) = lower.strip_prefix("tags:") {
+            tags.extend(rest.split(',').map(|s| s.trim().to_string()));
+        } else if let Some(start) = lower.find("<!-- tags:") {
+            if let Some(end) = lower[start..].find("-->") {
+                let content = &lower[start + 10..start + end];
+                tags.extend(content.split(',').map(|s| s.trim().to_string()));
+            }
+        }
+    }
+    tags
 }
 
 fn read_doc_text(path: &Path) -> Result<String, String> {

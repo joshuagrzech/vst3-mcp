@@ -74,6 +74,22 @@ pub struct GetParamRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetParamsByNameRequest {
+    /// List of parameter names to fuzzy match.
+    #[schemars(description = "List of parameter names to fuzzy match")]
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetPatchStateRequest {
+    /// Optional: Only return parameters that differ from default.
+    #[schemars(
+        description = "Optional: Only return parameters that differ from default (default: true)"
+    )]
+    pub diff_only: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SetParamRequest {
     /// Parameter ID from list_params.
     #[schemars(description = "Parameter ID from list_params")]
@@ -113,7 +129,9 @@ pub struct SearchPluginDocsRequest {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchSoundDesignGuideRequest {
     /// Broad sound design topic or target outcome (e.g., "vocal compression").
-    #[schemars(description = "Broad sound design topic or target outcome (e.g., vocal compression)")]
+    #[schemars(
+        description = "Broad sound design topic or target outcome (e.g., vocal compression)"
+    )]
     pub topic: String,
     /// Optional deeper query to refine the recipe search.
     #[schemars(description = "Optional deeper query to refine the recipe search")]
@@ -150,7 +168,9 @@ pub struct FindVstParameterRequest {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListParamsRequest {
     /// Optional name prefix filter (case-insensitive). Returns only params whose names start with this prefix. Use list_param_groups to discover valid prefixes.
-    #[schemars(description = "Optional name prefix filter (case-insensitive). Use list_param_groups to discover valid prefixes.")]
+    #[schemars(
+        description = "Optional name prefix filter (case-insensitive). Use list_param_groups to discover valid prefixes."
+    )]
     pub prefix: Option<String>,
 }
 
@@ -542,21 +562,27 @@ impl AudioHost {
     #[tool(
         description = "List all writable parameters/knobs with current values (value, display, units, steps). Supports optional prefix filter to narrow results (e.g. prefix='Reverb'). Use list_param_groups to discover valid prefixes. Call load_plugin first."
     )]
-    fn list_params(&self, Parameters(req): Parameters<ListParamsRequest>) -> Result<String, String> {
+    fn list_params(
+        &self,
+        Parameters(req): Parameters<ListParamsRequest>,
+    ) -> Result<String, String> {
         info!("list_params called (prefix={:?})", req.prefix);
 
         let mut parameters = self.get_live_params()?;
 
         // Update metadata cache as a side effect (metadata-only, no live values)
         {
-            let metadata: Vec<serde_json::Value> = parameters.iter().map(|p| {
-                serde_json::json!({
-                    "id": p["id"],
-                    "name": p["name"],
-                    "units": p["units"],
-                    "step_count": p["step_count"],
+            let metadata: Vec<serde_json::Value> = parameters
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "id": p["id"],
+                        "name": p["name"],
+                        "units": p["units"],
+                        "step_count": p["step_count"],
+                    })
                 })
-            }).collect();
+                .collect();
             if let Ok(mut cache) = self.param_cache.lock() {
                 *cache = Some(metadata);
             }
@@ -566,7 +592,8 @@ impl AudioHost {
         if let Some(ref pfx) = req.prefix {
             let pfx_lower = pfx.to_lowercase();
             parameters.retain(|p| {
-                p.get("name").and_then(|v| v.as_str())
+                p.get("name")
+                    .and_then(|v| v.as_str())
                     .map(|n| n.to_lowercase().starts_with(&pfx_lower))
                     .unwrap_or(false)
             });
@@ -591,16 +618,22 @@ impl AudioHost {
         let mut group_counts: HashMap<String, usize> = HashMap::new();
 
         for param in &metadata {
-            let name = param.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+            let name = param
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             let group = param_group_prefix(name);
             *group_counts.entry(group).or_insert(0) += 1;
         }
 
-        let mut groups: Vec<serde_json::Value> = group_counts.into_iter().map(|(group, count)| {
-            serde_json::json!({ "group": group, "count": count })
-        }).collect();
+        let mut groups: Vec<serde_json::Value> = group_counts
+            .into_iter()
+            .map(|(group, count)| serde_json::json!({ "group": group, "count": count }))
+            .collect();
         groups.sort_by(|a, b| {
-            a.get("group").and_then(|v| v.as_str()).unwrap_or_default()
+            a.get("group")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
                 .cmp(b.get("group").and_then(|v| v.as_str()).unwrap_or_default())
         });
         let group_count = groups.len();
@@ -613,15 +646,22 @@ impl AudioHost {
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
     }
 
-    #[tool(description = "Simulate parameter values to see their display strings (e.g., '100 Hz', 'On') without changing the plugin state.")]
+    #[tool(
+        description = "Simulate parameter values to see their display strings (e.g., '100 Hz', 'On') without changing the plugin state."
+    )]
     fn probe_param(
         &self,
         Parameters(req): Parameters<ProbeParamRequest>,
     ) -> Result<String, String> {
         info!("probe_param called: id={}, values={:?}", req.id, req.values);
 
-        let plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
-        let plugin = plugin_guard.as_ref().ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+        let plugin_guard = self
+            .plugin
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let plugin = plugin_guard
+            .as_ref()
+            .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
 
         let mut results = Vec::new();
 
@@ -630,7 +670,8 @@ impl AudioHost {
                 return Err(format!("Invalid value {}. Must be [0.0, 1.0]", val));
             }
 
-            let display = plugin.get_parameter_display_for_value(req.id, val)
+            let display = plugin
+                .get_parameter_display_for_value(req.id, val)
                 .unwrap_or_else(|_| format!("{:.3}", val));
 
             results.push(serde_json::json!({
@@ -647,15 +688,22 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "Search for parameters by name. Useful for plugins with many parameters where list_params is too large.")]
+    #[tool(
+        description = "Search for parameters by name. Useful for plugins with many parameters where list_params is too large."
+    )]
     fn search_params(
         &self,
         Parameters(req): Parameters<SearchParamsRequest>,
     ) -> Result<String, String> {
         info!("search_params called: query='{}'", req.query);
 
-        let plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
-        let plugin = plugin_guard.as_ref().ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+        let plugin_guard = self
+            .plugin
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let plugin = plugin_guard
+            .as_ref()
+            .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
 
         let count = plugin.get_parameter_count();
         let query_lower = req.query.to_lowercase();
@@ -663,10 +711,11 @@ impl AudioHost {
 
         for i in 0..count {
             if let Ok(info) = plugin.get_parameter_info(i) {
-                // Filter: must match query, be writable, and not hidden
-                if info.title.to_lowercase().contains(&query_lower) && info.is_writable() && !info.is_hidden() {
+                // Filter: must match query
+                if info.title.to_lowercase().contains(&query_lower) {
                     let value = plugin.get_parameter(info.id);
-                    let display = plugin.get_parameter_display(info.id)
+                    let display = plugin
+                        .get_parameter_display(info.id)
                         .unwrap_or_else(|_| format!("{:.3}", value));
 
                     matches.push(serde_json::json!({
@@ -721,11 +770,10 @@ impl AudioHost {
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
     }
 
-    #[tool(description = "Get a single parameter's current value and display string. Call load_plugin first.")]
-    fn get_param(
-        &self,
-        Parameters(req): Parameters<GetParamRequest>,
-    ) -> Result<String, String> {
+    #[tool(
+        description = "Get a single parameter's current value and display string. Call load_plugin first."
+    )]
+    fn get_param(&self, Parameters(req): Parameters<GetParamRequest>) -> Result<String, String> {
         info!("get_param called for id: {}", req.id);
 
         let plugin_guard = self
@@ -746,6 +794,57 @@ impl AudioHost {
             "id": req.id,
             "value": value,
             "display": display,
+        });
+
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(
+        description = "Get detailed parameter metadata including step labels for enumerated parameters. Call load_plugin first."
+    )]
+    fn get_param_info(
+        &self,
+        Parameters(req): Parameters<GetParamRequest>,
+    ) -> Result<String, String> {
+        info!("get_param_info called for id: {}", req.id);
+
+        let plugin_guard = self
+            .plugin
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+
+        let plugin = plugin_guard
+            .as_ref()
+            .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+
+        let info = plugin
+            .get_parameter_info(req.id as i32)
+            .map_err(|e| format!("Failed to get info for {}: {}", req.id, e))?;
+
+        let value = plugin.get_parameter(req.id);
+        let display = plugin
+            .get_parameter_display(req.id)
+            .unwrap_or_else(|_| format!("{:.3}", value));
+
+        // Fetch step labels if step_count > 0 (e.g. "Sine", "Square")
+        let step_labels = if info.step_count > 0 {
+            plugin
+                .get_parameter_step_labels(req.id, info.step_count)
+                .ok()
+        } else {
+            None
+        };
+
+        let response = serde_json::json!({
+            "id": req.id,
+            "name": info.title,
+            "value": value,
+            "display": display,
+            "units": info.units,
+            "step_count": info.step_count,
+            "default_normalized": info.default_normalized,
+            "flags": info.flags,
+            "step_labels": step_labels,
         });
 
         Ok(serde_json::to_string_pretty(&response).unwrap())
@@ -800,16 +899,7 @@ impl AudioHost {
     fn batch_set(&self, Parameters(req): Parameters<BatchSetRequest>) -> Result<String, String> {
         info!("batch_set called with {} changes", req.changes.len());
 
-        // Validate all changes first
-        for change in &req.changes {
-            if change.value < 0.0 || change.value > 1.0 {
-                return Err(format!(
-                    "Invalid parameter value for id {}: {}. Must be in range [0.0, 1.0]",
-                    change.id, change.value
-                ));
-            }
-        }
-
+        let mut results = Vec::new();
         let mut plugin_guard = self
             .plugin
             .lock()
@@ -821,15 +911,121 @@ impl AudioHost {
 
         // Queue all changes
         for change in &req.changes {
-            plugin.queue_parameter_change(change.id, change.value);
+            let clamped = change.value.clamp(0.0, 1.0);
+            plugin.queue_parameter_change(change.id, clamped);
+
+            // Try to get display for confirmation
+            let display = plugin
+                .get_parameter_display_for_value(change.id, clamped)
+                .unwrap_or_else(|_| format!("{:.3}", clamped));
+
+            results.push(serde_json::json!({
+                "id": change.id,
+                "requested": change.value,
+                "applied": clamped,
+                "clamped": (change.value - clamped).abs() > 1e-6,
+                "display": display,
+            }));
         }
 
         let response = serde_json::json!({
             "status": "queued",
             "changes_queued": req.changes.len(),
+            "results": results,
         });
 
         info!("Batch queued {} parameter changes", req.changes.len());
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(
+        description = "Batch lookup of parameter IDs by name (fuzzy match). Returns best match for each query."
+    )]
+    fn get_params_by_name(
+        &self,
+        Parameters(req): Parameters<GetParamsByNameRequest>,
+    ) -> Result<String, String> {
+        let params = self.get_cached_param_metadata()?;
+        let mut results = Vec::new();
+
+        for name in req.names {
+            let (primary, aliases) = query_terms(&name);
+            let mut scored: Vec<(u32, serde_json::Value)> = params
+                .iter()
+                .filter_map(|p| {
+                    let s = score_param(p, &primary, &aliases);
+                    if s > 0 { Some((s, p.clone())) } else { None }
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+
+            if let Some((score, best_match)) = scored.first() {
+                results.push(serde_json::json!({
+                    "query": name,
+                    "match": best_match,
+                    "score": score
+                }));
+            } else {
+                results.push(serde_json::json!({
+                    "query": name,
+                    "match": null,
+                    "score": 0
+                }));
+            }
+        }
+
+        let response = serde_json::json!({
+            "results": results,
+            "count": results.len()
+        });
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(
+        description = "Get current patch state (all non-default parameters). Useful for verifying changes or saving partial presets."
+    )]
+    fn get_patch_state(
+        &self,
+        Parameters(req): Parameters<GetPatchStateRequest>,
+    ) -> Result<String, String> {
+        let diff_only = req.diff_only.unwrap_or(true);
+        let plugin_guard = self
+            .plugin
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let plugin = plugin_guard
+            .as_ref()
+            .ok_or_else(|| "No plugin loaded.".to_string())?;
+
+        let count = plugin.get_parameter_count();
+        let mut result = Vec::new();
+
+        for i in 0..count {
+            if let Ok(info) = plugin.get_parameter_info(i) {
+                let value = plugin.get_parameter(info.id);
+
+                if diff_only && (value - info.default_normalized).abs() < 1e-4 {
+                    continue;
+                }
+
+                let display = plugin
+                    .get_parameter_display(info.id)
+                    .unwrap_or_else(|_| format!("{:.3}", value));
+
+                result.push(serde_json::json!({
+                    "id": info.id,
+                    "name": info.title,
+                    "value": value,
+                    "display": display,
+                    "default": info.default_normalized
+                }));
+            }
+        }
+
+        let response = serde_json::json!({
+            "parameters": result,
+            "count": result.len(),
+        });
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
@@ -861,7 +1057,8 @@ impl AudioHost {
             })
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
-        let matches: Vec<serde_json::Value> = scored.into_iter().take(limit).map(|(_, p)| p).collect();
+        let matches: Vec<serde_json::Value> =
+            scored.into_iter().take(limit).map(|(_, p)| p).collect();
 
         let mut all_terms: Vec<String> = primary.iter().chain(aliases.iter()).cloned().collect();
         all_terms.sort();
@@ -1053,28 +1250,32 @@ impl AudioHost {
 
     /// Fetch all writable, visible parameters with live values from the plugin.
     fn get_live_params(&self) -> Result<Vec<serde_json::Value>, String> {
-        let plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
-        let plugin = plugin_guard.as_ref().ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+        let plugin_guard = self
+            .plugin
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let plugin = plugin_guard
+            .as_ref()
+            .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
 
         let count = plugin.get_parameter_count();
         let mut parameters = Vec::new();
 
         for i in 0..count {
             if let Ok(info) = plugin.get_parameter_info(i) {
-                if info.is_writable() && !info.is_hidden() {
-                    let value = plugin.get_parameter(info.id);
-                    let display = plugin.get_parameter_display(info.id)
-                        .unwrap_or_else(|_| format!("{:.3}", value));
+                let value = plugin.get_parameter(info.id);
+                let display = plugin
+                    .get_parameter_display(info.id)
+                    .unwrap_or_else(|_| format!("{:.3}", value));
 
-                    parameters.push(serde_json::json!({
-                        "id": info.id,
-                        "name": info.title,
-                        "value": value,
-                        "display": display,
-                        "units": info.units,
-                        "step_count": info.step_count
-                    }));
-                }
+                parameters.push(serde_json::json!({
+                    "id": info.id,
+                    "name": info.title,
+                    "value": value,
+                    "display": display,
+                    "units": info.units,
+                    "step_count": info.step_count
+                }));
             }
         }
         Ok(parameters)
@@ -1085,7 +1286,10 @@ impl AudioHost {
     fn get_cached_param_metadata(&self) -> Result<Vec<serde_json::Value>, String> {
         // Fast path: return from cache
         {
-            let cache = self.param_cache.lock().map_err(|e| format!("Lock error: {}", e))?;
+            let cache = self
+                .param_cache
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
             if let Some(ref cached) = *cache {
                 return Ok(cached.clone());
             }
@@ -1093,21 +1297,24 @@ impl AudioHost {
 
         // Cache miss: fetch from plugin (metadata only, no live values)
         let metadata = {
-            let plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
-            let plugin = plugin_guard.as_ref().ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+            let plugin_guard = self
+                .plugin
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
+            let plugin = plugin_guard
+                .as_ref()
+                .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
 
             let count = plugin.get_parameter_count();
             let mut meta = Vec::new();
             for i in 0..count {
                 if let Ok(info) = plugin.get_parameter_info(i) {
-                    if info.is_writable() && !info.is_hidden() {
-                        meta.push(serde_json::json!({
-                            "id": info.id,
-                            "name": info.title,
-                            "units": info.units,
-                            "step_count": info.step_count,
-                        }));
-                    }
+                    meta.push(serde_json::json!({
+                        "id": info.id,
+                        "name": info.title,
+                        "units": info.units,
+                        "step_count": info.step_count,
+                    }));
                 }
             }
             meta
@@ -1185,10 +1392,18 @@ fn query_terms(query: &str) -> (Vec<String>, Vec<String>) {
 
     let mut aliases: Vec<String> = Vec::new();
     if lower.contains("brighter") {
-        aliases.extend(["bright", "brightness", "treble", "presence"].iter().map(|s| s.to_string()));
+        aliases.extend(
+            ["bright", "brightness", "treble", "presence"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
     }
     if lower.contains("harsh") {
-        aliases.extend(["harsh", "resonance", "q", "presence"].iter().map(|s| s.to_string()));
+        aliases.extend(
+            ["harsh", "resonance", "q", "presence"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
     }
     if lower.contains("reverb") {
         // Omit "decay" and "mix" — too ambiguous (match unrelated Envelope/Volume params)
@@ -1205,20 +1420,45 @@ fn query_terms(query: &str) -> (Vec<String>, Vec<String>) {
 /// Score a param against primary and alias terms. Returns 0 if no match.
 /// Higher score = better match. Primary terms outweigh aliases.
 fn score_param(param: &serde_json::Value, primary: &[String], aliases: &[String]) -> u32 {
-    let name = param.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+    let name = param
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
     let name_words: Vec<&str> = name.split_whitespace().collect();
-    let display = param.get("display").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+    let display = param
+        .get("display")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
     let mut score = 0u32;
 
     for term in primary {
-        if name_words.iter().any(|w| *w == term.as_str()) { score += 100; }  // exact word in name
-        else if name.starts_with(term.as_str()) { score += 80; }             // name prefix
-        else if name.contains(term.as_str()) { score += 40; }               // substring in name
-        if display.contains(term.as_str()) { score += 5; }                   // in display value
+        if name == *term {
+            score += 2000;
+        }
+        // exact full name match
+        else if name_words.iter().any(|w| *w == term.as_str()) {
+            score += 100;
+        }
+        // exact word in name
+        else if name.starts_with(term.as_str()) {
+            score += 80;
+        }
+        // name prefix
+        else if name.contains(term.as_str()) {
+            score += 40;
+        } // substring in name
+        if display.contains(term.as_str()) {
+            score += 5;
+        } // in display value
     }
     for term in aliases {
-        if name_words.iter().any(|w| *w == term.as_str()) { score += 10; }
-        else if name.contains(term.as_str()) { score += 3; }
+        if name_words.iter().any(|w| *w == term.as_str()) {
+            score += 10;
+        } else if name.contains(term.as_str()) {
+            score += 3;
+        }
     }
     score
 }

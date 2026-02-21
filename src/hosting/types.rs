@@ -63,6 +63,8 @@ pub struct ParamInfo {
     pub step_count: i32,
     /// Parameter flags from the plugin.
     pub flags: u32,
+    /// Step labels if step_count > 0 (e.g. ["Sine", "Square", "Saw"]).
+    pub step_labels: Option<Vec<String>>,
 }
 
 impl ParamInfo {

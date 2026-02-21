@@ -149,9 +149,37 @@ struct ProxySetParamByNameRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyGetParamsByNameRequest {
+    pub instance_id: Option<String>,
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyGetPatchStateRequest {
+    pub instance_id: Option<String>,
+    pub diff_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct GuardAudioRoutingRequest {
     pub user_message: String,
     pub requested_tool: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchPluginDocsRequest {
+    /// Plugin name to search docs for (e.g., "Vital", "Serum").
+    pub plugin_name: String,
+    /// Targeted question (e.g., "modulation routing", "filter envelope quirks").
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchSoundDesignRequest {
+    /// Broad sound design topic or target outcome (e.g., "neuro bass", "reese bass", "vocal compression").
+    pub topic: String,
+    /// Optional deeper query to refine the recipe search.
+    pub query: Option<String>,
 }
 
 const AUDIO_INTENT_THRESHOLD: f64 = 0.55;
@@ -241,6 +269,259 @@ const HARD_AUDIO_ROUTE_TERMS_NON_PATCH: [&str; 13] = [
     "synth",
 ];
 
+// ---- Doc search helpers (inline, no extra dependency) ----
+
+const PLUGIN_DOCS_ENV: &str = "AGENTAUDIO_PLUGIN_DOCS_DIR";
+const SOUND_GUIDE_ENV: &str = "AGENTAUDIO_SOUND_DESIGN_DIR";
+const DEFAULT_PLUGIN_DOCS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/plugins");
+const DEFAULT_SOUND_GUIDE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/sound-design");
+const DOC_MAX_EXCERPTS: usize = 3;
+const DOC_MAX_EXCERPT_CHARS: usize = 600;
+
+const DOC_STOPWORDS: [&str; 31] = [
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "in", "into", "is",
+    "it", "of", "on", "or", "that", "the", "their", "there", "these", "this", "to", "use", "using",
+    "what", "with", "you", "your",
+];
+
+fn docs_base_dir(env_var: &str, default: &str) -> std::path::PathBuf {
+    std::env::var(env_var)
+        .ok()
+        .map(|s| std::path::PathBuf::from(s.trim().to_string()))
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::PathBuf::from(default))
+}
+
+fn collect_md_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(collect_md_files(&path));
+            } else if matches!(
+                path.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .as_deref(),
+                Some("md" | "txt" | "json")
+            ) {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+fn doc_tokenize(s: &str) -> Vec<String> {
+    let stop: std::collections::HashSet<&str> = DOC_STOPWORDS.into_iter().collect();
+    let mut terms: Vec<String> = s
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| t.len() >= 2 && !stop.contains(*t))
+        .map(|t| t.to_string())
+        .collect();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn score_doc_chunk(chunk: &str, terms: &[String]) -> usize {
+    if terms.is_empty() {
+        return 0;
+    }
+    let lower = chunk.to_lowercase();
+    let mut unique_hits = 0usize;
+    let mut total_hits = 0usize;
+    for term in terms {
+        let n = if term.len() <= 2 {
+            lower
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|tok| *tok == term.as_str())
+                .count()
+        } else {
+            lower.matches(term.as_str()).count()
+        };
+        if n > 0 {
+            unique_hits += 1;
+            total_hits += n;
+        }
+    }
+    unique_hits * 20 + total_hits
+}
+
+fn truncate_doc_excerpt(s: &str) -> String {
+    if s.chars().count() <= DOC_MAX_EXCERPT_CHARS {
+        return s.to_string();
+    }
+    let mut idx = 0;
+    let mut cnt = 0;
+    for (i, _) in s.char_indices() {
+        if cnt == DOC_MAX_EXCERPT_CHARS {
+            break;
+        }
+        idx = i;
+        cnt += 1;
+    }
+    let mut out = s[..=idx].to_string();
+    if let Some(sp) = out.rfind(' ') {
+        out.truncate(sp);
+    }
+    out.push_str("...");
+    out
+}
+
+/// Score paragraphs in `files` against `terms`. Returns (score, source_filename, excerpt) sorted desc.
+fn score_files_for_excerpts(
+    files: &[std::path::PathBuf],
+    terms: &[String],
+) -> Vec<(usize, String, String)> {
+    let mut scored: Vec<(usize, String, String)> = Vec::new();
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let source = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        for chunk in text.replace("\r\n", "\n").split("\n\n") {
+            let clean: String = chunk
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if clean.is_empty() {
+                continue;
+            }
+            let s = score_doc_chunk(&clean, terms);
+            if s > 0 {
+                scored.push((s, source.clone(), truncate_doc_excerpt(&clean)));
+            }
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.dedup_by(|a, b| a.1 == b.1 && a.2 == b.2);
+    scored
+}
+
+fn plugin_key(name: &str) -> String {
+    name.to_ascii_lowercase().replace([' ', '-', '_'], "")
+}
+
+fn plugin_docs_exist(plugin_name: &str) -> bool {
+    let dir = docs_base_dir(PLUGIN_DOCS_ENV, DEFAULT_PLUGIN_DOCS);
+    let key = plugin_key(plugin_name);
+    collect_md_files(&dir).iter().any(|p| {
+        let stem = plugin_key(p.file_stem().and_then(|s| s.to_str()).unwrap_or(""));
+        stem.contains(&key) || key.contains(&stem)
+    })
+}
+
+fn search_plugin_docs_impl(plugin_name: &str, query: &str) -> Result<serde_json::Value, String> {
+    let dir = docs_base_dir(PLUGIN_DOCS_ENV, DEFAULT_PLUGIN_DOCS);
+    let all_files = collect_md_files(&dir);
+    if all_files.is_empty() {
+        return Err(format!(
+            "No plugin docs found in '{}'. Set {} or add .md files.",
+            dir.display(),
+            PLUGIN_DOCS_ENV
+        ));
+    }
+    let key = plugin_key(plugin_name);
+    let files: Vec<_> = all_files
+        .iter()
+        .filter(|p| {
+            let stem = plugin_key(p.file_stem().and_then(|s| s.to_str()).unwrap_or(""));
+            stem.contains(&key) || key.contains(&stem)
+        })
+        .cloned()
+        .collect();
+    if files.is_empty() {
+        let available: Vec<_> = all_files
+            .iter()
+            .filter_map(|p| p.file_stem()?.to_str().map(|s| s.to_string()))
+            .collect();
+        return Err(format!(
+            "No docs matched plugin '{}'. Available: [{}]. Add docs/plugins/{}.md or set {}.",
+            plugin_name,
+            available.join(", "),
+            plugin_name,
+            PLUGIN_DOCS_ENV
+        ));
+    }
+    let terms = doc_tokenize(query);
+    let scored = score_files_for_excerpts(&files, &terms);
+    if scored.is_empty() {
+        return Err(format!(
+            "No excerpts matched query '{}' in {plugin_name} docs. Try a broader query or use find_vst_parameter directly.",
+            query
+        ));
+    }
+    let top: Vec<_> = scored.into_iter().take(DOC_MAX_EXCERPTS).collect();
+    Ok(serde_json::json!({
+        "plugin_name": plugin_name,
+        "query": query,
+        "excerpts": top.iter().map(|(_, _, text)| text).collect::<Vec<_>>(),
+        "sources": top.iter().map(|(_, src, _)| src).collect::<Vec<_>>(),
+    }))
+}
+
+fn search_sound_design_impl(topic: &str, query: Option<&str>) -> Result<serde_json::Value, String> {
+    let dir = docs_base_dir(SOUND_GUIDE_ENV, DEFAULT_SOUND_GUIDE);
+    let files = collect_md_files(&dir);
+    if files.is_empty() {
+        return Err(format!(
+            "No sound design guides found in '{}'. Set {} or add .md files.",
+            dir.display(),
+            SOUND_GUIDE_ENV
+        ));
+    }
+    let search = match query {
+        Some(q) => format!("{topic} {q}"),
+        None => topic.to_string(),
+    };
+    let terms = doc_tokenize(&search);
+    let scored = score_files_for_excerpts(&files, &terms);
+    if scored.is_empty() {
+        return Err(format!(
+            "No sound design guide excerpts matched '{topic}'. Try a different topic or use find_vst_parameter directly."
+        ));
+    }
+    // Group by source, pick the highest-scoring guide
+    let mut by_source: std::collections::HashMap<String, Vec<(usize, String)>> =
+        std::collections::HashMap::new();
+    for (score, source, text) in scored {
+        by_source.entry(source).or_default().push((score, text));
+    }
+    let mut ranked: Vec<(usize, String, Vec<String>)> = by_source
+        .into_iter()
+        .map(|(source, mut entries)| {
+            entries.sort_by(|a, b| b.0.cmp(&a.0));
+            let total: usize = entries.iter().take(DOC_MAX_EXCERPTS).map(|(s, _)| *s).sum();
+            let texts: Vec<String> = entries
+                .into_iter()
+                .take(DOC_MAX_EXCERPTS)
+                .map(|(_, t)| t)
+                .collect();
+            (total, source, texts)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    let (_, guide, excerpts) = ranked.into_iter().next().unwrap();
+    Ok(serde_json::json!({
+        "topic": topic,
+        "guide": guide,
+        "excerpts": excerpts,
+        "step_by_step_recipe": excerpts.join("\n\n"),
+    }))
+}
+
+// ---- Audio intent routing helpers ----
+
 fn contains_any(lower: &str, terms: &[&str]) -> bool {
     terms.iter().any(|term| contains_term(lower, term))
 }
@@ -266,10 +547,18 @@ fn query_terms(query: &str) -> (Vec<String>, Vec<String>) {
 
     let mut aliases: Vec<String> = Vec::new();
     if lower.contains("brighter") {
-        aliases.extend(["bright", "brightness", "treble", "presence"].iter().map(|s| s.to_string()));
+        aliases.extend(
+            ["bright", "brightness", "treble", "presence"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
     }
     if lower.contains("harsh") {
-        aliases.extend(["harsh", "resonance", "q", "presence"].iter().map(|s| s.to_string()));
+        aliases.extend(
+            ["harsh", "resonance", "q", "presence"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
     }
     if lower.contains("reverb") {
         // Omit "decay" and "mix" — too ambiguous (match unrelated Envelope/Volume params)
@@ -286,20 +575,41 @@ fn query_terms(query: &str) -> (Vec<String>, Vec<String>) {
 /// Score a param against primary and alias terms. Returns 0 if no match.
 /// Higher score = better match. Primary terms outweigh aliases.
 fn score_param(param: &serde_json::Value, primary: &[String], aliases: &[String]) -> u32 {
-    let name = param.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+    let name = param
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
     let name_words: Vec<&str> = name.split_whitespace().collect();
-    let display = param.get("display").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+    let display = param
+        .get("display")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
     let mut score = 0u32;
 
     for term in primary {
-        if name_words.iter().any(|w| *w == term.as_str()) { score += 100; }  // exact word in name
-        else if name.starts_with(term.as_str()) { score += 80; }             // name prefix
-        else if name.contains(term.as_str()) { score += 40; }               // substring in name
-        if display.contains(term.as_str()) { score += 5; }                   // in display value
+        if name_words.iter().any(|w| *w == term.as_str()) {
+            score += 100;
+        }
+        // exact word in name
+        else if name.starts_with(term.as_str()) {
+            score += 80;
+        }
+        // name prefix
+        else if name.contains(term.as_str()) {
+            score += 40;
+        } // substring in name
+        if display.contains(term.as_str()) {
+            score += 5;
+        } // in display value
     }
     for term in aliases {
-        if name_words.iter().any(|w| *w == term.as_str()) { score += 10; }
-        else if name.contains(term.as_str()) { score += 3; }
+        if name_words.iter().any(|w| *w == term.as_str()) {
+            score += 10;
+        } else if name.contains(term.as_str()) {
+            score += 3;
+        }
     }
     score
 }
@@ -483,7 +793,11 @@ impl RouterMcpServer {
         let reg = self.state.registry.read().await;
         reg.get(instance_id)
             .map(|i| i.endpoint.clone())
-            .ok_or_else(|| format!("Unknown instance_id '{instance_id}'. Call list_instances to get valid IDs."))
+            .ok_or_else(|| {
+                format!(
+                    "Unknown instance_id '{instance_id}'. Call list_instances to get valid IDs."
+                )
+            })
     }
 
     async fn call_wrapper_tool(
@@ -576,7 +890,10 @@ impl RouterMcpServer {
     ) -> Result<String, String> {
         let id = self.resolve_instance_id(req.instance_id).await?;
         let args = serde_json::json!({ "uid": req.uid }).as_object().cloned();
-        self.call_wrapper_tool(&id, "load_child_plugin", args).await
+        let raw = self
+            .call_wrapper_tool(&id, "load_child_plugin", args)
+            .await?;
+        inject_docs_hint(raw)
     }
 
     #[tool(description = "Alias for load_child_plugin. Natural-language name for 'load plugin'.")]
@@ -586,7 +903,10 @@ impl RouterMcpServer {
     ) -> Result<String, String> {
         let id = self.resolve_instance_id(req.instance_id).await?;
         let args = serde_json::json!({ "uid": req.uid }).as_object().cloned();
-        self.call_wrapper_tool(&id, "load_child_plugin", args).await
+        let raw = self
+            .call_wrapper_tool(&id, "load_child_plugin", args)
+            .await?;
+        inject_docs_hint(raw)
     }
 
     #[tool(description = "Unload currently loaded child plugin.")]
@@ -627,24 +947,32 @@ impl RouterMcpServer {
     ) -> Result<String, String> {
         let id = self.resolve_instance_id(req.instance_id).await?;
         let args = if req.prefix.is_some() {
-            serde_json::json!({ "prefix": req.prefix }).as_object().cloned()
+            serde_json::json!({ "prefix": req.prefix })
+                .as_object()
+                .cloned()
         } else {
             None
         };
         self.call_wrapper_tool(&id, "list_params", args).await
     }
 
-    #[tool(description = "Search parameters by exact name substring. Faster and more precise than find_vst_parameter when you know the param name.")]
+    #[tool(
+        description = "Search parameters by exact name substring. Faster and more precise than find_vst_parameter when you know the param name."
+    )]
     async fn search_params(
         &self,
         Parameters(req): Parameters<ProxySearchParamsRequest>,
     ) -> Result<String, String> {
         let id = self.resolve_instance_id(req.instance_id).await?;
-        let args = serde_json::json!({ "query": req.query }).as_object().cloned();
+        let args = serde_json::json!({ "query": req.query })
+            .as_object()
+            .cloned();
         self.call_wrapper_tool(&id, "search_params", args).await
     }
 
-    #[tool(description = "List logical parameter groups available in the loaded plugin (e.g. 'Reverb', 'Envelope 1', 'Filter 1'). Use before list_params or find_vst_parameter to discover available sections.")]
+    #[tool(
+        description = "List logical parameter groups available in the loaded plugin (e.g. 'Reverb', 'Envelope 1', 'Filter 1'). Use before list_params or find_vst_parameter to discover available sections."
+    )]
     async fn list_param_groups(
         &self,
         Parameters(req): Parameters<ProxyInstanceOnly>,
@@ -724,7 +1052,8 @@ impl RouterMcpServer {
             })
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
-        let matches: Vec<serde_json::Value> = scored.into_iter().take(limit).map(|(_, p)| p).collect();
+        let matches: Vec<serde_json::Value> =
+            scored.into_iter().take(limit).map(|(_, p)| p).collect();
 
         let mut all_terms: Vec<String> = primary.iter().chain(aliases.iter()).cloned().collect();
         all_terms.sort();
@@ -736,7 +1065,7 @@ impl RouterMcpServer {
             "count": matches.len(),
             "source_count": source_count,
             "matches": matches,
-            "next_step": "Use preview_vst_parameter_values, then set_param_realtime/batch_set_realtime (or edit_vst_patch).",
+            "next_step": "Call get_param_info on target ids to understand ranges, then set_param_by_name or batch_set_realtime to apply. If you haven't called search_plugin_docs yet, do that first — it contains critical quirks.",
         });
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
     }
@@ -810,12 +1139,13 @@ impl RouterMcpServer {
             "recommended_first_tool": recommended_first_tool,
             "recommended_workflow": [
                 "1. scan_plugins",
-                "2. load_plugin (by uid)",
-                "3. find_vst_parameter (search by name/intent)",
-                "4. get_param_info (probe range for a specific id before editing)",
-                "5. preview_vst_parameter_values (confirm current values)",
-                "6. set_param_by_name (if you know the name) OR set_param_realtime/batch_set_realtime/edit_vst_patch (if you know the id)",
-                "7. save_preset (persist to .vstpreset file when done)"
+                "2. load_plugin (by uid) — check docs_hint in response",
+                "3. search_plugin_docs (get plugin-specific quirks and parameter mappings — do this BEFORE editing)",
+                "4. search_sound_design_guide (get step-by-step recipe if user has a sound goal)",
+                "5. find_vst_parameter (search by name/intent)",
+                "6. get_param_info (probe range for a specific id before editing)",
+                "7. set_param_by_name (if you know the name) OR set_param_realtime/batch_set_realtime/edit_vst_patch (if you know the id)",
+                "8. save_preset (persist to .vstpreset file when done)"
             ],
         });
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
@@ -879,6 +1209,56 @@ impl RouterMcpServer {
             .cloned();
         self.call_wrapper_tool(&id, "set_param_by_name", args).await
     }
+
+    #[tool(
+        description = "Batch lookup of parameter IDs by name (fuzzy match). Returns best match for each query."
+    )]
+    async fn get_params_by_name(
+        &self,
+        Parameters(req): Parameters<ProxyGetParamsByNameRequest>,
+    ) -> Result<String, String> {
+        let id = self.resolve_instance_id(req.instance_id).await?;
+        let args = serde_json::json!({ "names": req.names })
+            .as_object()
+            .cloned();
+        self.call_wrapper_tool(&id, "get_params_by_name", args)
+            .await
+    }
+
+    #[tool(description = "Get current patch state (all non-default parameters).")]
+    async fn get_current_patch_state(
+        &self,
+        Parameters(req): Parameters<ProxyGetPatchStateRequest>,
+    ) -> Result<String, String> {
+        let id = self.resolve_instance_id(req.instance_id).await?;
+        // Map request to wrapper tool "get_patch_state"
+        let args = serde_json::json!({ "diff_only": req.diff_only })
+            .as_object()
+            .cloned();
+        self.call_wrapper_tool(&id, "get_patch_state", args).await
+    }
+
+    #[tool(
+        description = "Search local plugin documentation for plugin-specific quirks, parameter mappings, and routing notes (e.g. 'Vital modulation matrix', 'Serum LFO routing'). Call BEFORE editing an unfamiliar plugin — docs contain critical quirks not discoverable via parameter search alone. Returns targeted excerpts."
+    )]
+    async fn search_plugin_docs(
+        &self,
+        Parameters(req): Parameters<SearchPluginDocsRequest>,
+    ) -> Result<String, String> {
+        let result = search_plugin_docs_impl(&req.plugin_name, &req.query)?;
+        serde_json::to_string_pretty(&result).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(
+        description = "Search local sound design guides for step-by-step recipes (e.g. 'neuro bass', 'reese bass', 'vocal compression chain'). Call BEFORE parameter editing when the user describes a sound goal — the recipe tells you which parameters to target and in what order."
+    )]
+    async fn search_sound_design_guide(
+        &self,
+        Parameters(req): Parameters<SearchSoundDesignRequest>,
+    ) -> Result<String, String> {
+        let result = search_sound_design_impl(&req.topic, req.query.as_deref())?;
+        serde_json::to_string_pretty(&result).map_err(|e| format!("Serialization failed: {e}"))
+    }
 }
 
 #[tool_handler]
@@ -892,18 +1272,45 @@ Disambiguation: In audio context, patch = preset/sound configuration, not code d
 Run guard_audio_routing before any web search call.\n\
 Recommended workflow:\n\
   1. scan_plugins — discover available plugins\n\
-  2. load_plugin — load by UID\n\
-  3. find_vst_parameter — search parameters by natural language\n\
-  4. get_param_info — probe display range for a specific parameter id before editing\n\
-  5. preview_vst_parameter_values — confirm current values for target ids\n\
-  6. set_param_by_name (if you know the name) OR set_param_realtime / batch_set_realtime / edit_vst_patch (if you know the id)\n\
-  7. save_preset — persist to .vstpreset file when satisfied with the sound"
+  2. load_plugin — load by UID (response includes docs_hint if local docs exist)\n\
+  3. search_plugin_docs — ALWAYS call this before editing: get plugin-specific quirks, routing rules, and parameter mappings\n\
+  4. search_sound_design_guide — call this when user describes a sound goal (e.g. 'neuro bass', 'reese bass') to get a step-by-step recipe\n\
+  5. find_vst_parameter — search parameters by natural language\n\
+  6. get_param_info — probe display range for a specific parameter id before editing\n\
+  7. set_param_by_name (if you know the name) OR set_param_realtime / batch_set_realtime / edit_vst_patch (if you know the id)\n\
+  8. save_preset — persist to .vstpreset file when satisfied with the sound"
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
     }
+}
+
+/// Parse a `load_child_plugin` JSON response and inject a `docs_hint` field indicating
+/// whether local plugin docs exist and what tool to call next.
+fn inject_docs_hint(raw: String) -> Result<String, String> {
+    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&raw) {
+        if let Some(name) = val
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        {
+            let hint = if plugin_docs_exist(&name) {
+                format!(
+                    "Plugin docs found — call search_plugin_docs(\"{name}\", \"<your question>\") BEFORE editing parameters.",
+                )
+            } else {
+                format!(
+                    "No local docs for '{name}'. Explore with find_vst_parameter, or add docs/plugins/{name}.md for future sessions.",
+                )
+            };
+            val["docs_hint"] = serde_json::json!(hint);
+            return serde_json::to_string_pretty(&val)
+                .map_err(|e| format!("Serialization failed: {e}"));
+        }
+    }
+    Ok(raw)
 }
 
 fn call_tool_result_to_text(result: CallToolResult) -> Result<String, String> {
