@@ -510,6 +510,27 @@ struct PreviewVstParameterValuesRequest {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetParamInfoRequest {
+    pub id: u32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SavePresetRequest {
+    pub path: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct LoadPresetRequest {
+    pub path: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SetParamByNameRequest {
+    pub name: String,
+    pub value: f64,
+}
+
 #[derive(Default)]
 struct GuiState {
     /// User-entered path to a .vst3 bundle (e.g. /usr/lib/vst3/MyPlugin.vst3 or ~/.vst3/Synth.vst3)
@@ -801,6 +822,156 @@ impl WrapperMcpServer {
         let response = serde_json::json!({
             "count": selected.len(),
             "values": selected,
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(
+        description = "Get parameter metadata and range probe. Use to understand display range before setting values."
+    )]
+    fn get_param_info(
+        &self,
+        Parameters(req): Parameters<GetParamInfoRequest>,
+    ) -> Result<String, String> {
+        self.with_child_plugin(|plugin| {
+            let count = plugin.get_parameter_count();
+            let mut info_opt = None;
+            for i in 0..count {
+                if let Ok(info) = plugin.get_parameter_info(i) {
+                    if info.id == req.id {
+                        info_opt = Some(info);
+                        break;
+                    }
+                }
+            }
+            let info = info_opt.ok_or_else(|| format!("Parameter id {} not found", req.id))?;
+
+            let default_display = plugin
+                .get_parameter_display_for_value(info.id, info.default_normalized)
+                .map_err(|e| format!("Failed to get default display: {e}"))?;
+
+            let probe_vals = [0.0, 0.25, 0.5, 0.75, 1.0];
+            let mut range_probe = serde_json::Map::new();
+            for v in probe_vals {
+                let key = format!("{:.2}", v);
+                let display = plugin
+                    .get_parameter_display_for_value(info.id, v)
+                    .unwrap_or_else(|_| format!("{v:.3}"));
+                range_probe.insert(key, serde_json::Value::String(display));
+            }
+
+            let response = serde_json::json!({
+                "id": info.id,
+                "name": info.title,
+                "units": info.units,
+                "default_normalized": info.default_normalized,
+                "default_display": default_display,
+                "step_count": info.step_count,
+                "is_writable": info.is_writable(),
+                "is_bypass": info.is_bypass(),
+                "range_probe": range_probe,
+            });
+            serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+        })
+    }
+
+    #[tool(
+        description = "Save current plugin state to a .vstpreset file. Use after patch/preset edits."
+    )]
+    fn save_preset(
+        &self,
+        Parameters(req): Parameters<SavePresetRequest>,
+    ) -> Result<String, String> {
+        let path = PathBuf::from(expand_tilde(&req.path));
+        self.with_child_plugin(|plugin| {
+            vst3_mcp_host::preset::state::save_plugin_state(plugin, &path)
+                .map_err(|e| format!("Failed to save preset: {e}"))?;
+            let response = serde_json::json!({
+                "status": "saved",
+                "path": path.to_string_lossy(),
+                "timestamp_ms": now_ms(),
+            });
+            serde_json::to_string_pretty(&response)
+                .map_err(|e| format!("Serialization failed: {e}"))
+        })
+    }
+
+    #[tool(
+        description = "Load plugin state from a .vstpreset file. Call load_child_plugin first."
+    )]
+    fn load_preset(
+        &self,
+        Parameters(req): Parameters<LoadPresetRequest>,
+    ) -> Result<String, String> {
+        let path = PathBuf::from(expand_tilde(&req.path));
+        self.with_child_plugin(|plugin| {
+            vst3_mcp_host::preset::state::restore_plugin_state(plugin, &path)
+                .map_err(|e| format!("Failed to load preset: {e}"))?;
+            let response = serde_json::json!({
+                "status": "loaded",
+                "path": path.to_string_lossy(),
+                "timestamp_ms": now_ms(),
+            });
+            serde_json::to_string_pretty(&response)
+                .map_err(|e| format!("Serialization failed: {e}"))
+        })
+    }
+
+    #[tool(
+        description = "Set a parameter by name instead of id. Uses case-insensitive match. Returns resolved id and applied value."
+    )]
+    fn set_param_by_name(
+        &self,
+        Parameters(req): Parameters<SetParamByNameRequest>,
+    ) -> Result<String, String> {
+        if !(0.0..=1.0).contains(&req.value) {
+            return Err(format!(
+                "Invalid parameter value {}. Must be in [0.0, 1.0]",
+                req.value
+            ));
+        }
+
+        let raw = self.list_params()?;
+        let params = parse_params_from_list_result(&raw)?;
+        let name_lower = req.name.to_lowercase();
+
+        let matched = params
+            .iter()
+            .find(|p| {
+                p.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|n| n.to_lowercase() == name_lower)
+                    .unwrap_or(false)
+            })
+            .or_else(|| {
+                params.iter().find(|p| {
+                    p.get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|n| n.to_lowercase().contains(&name_lower))
+                        .unwrap_or(false)
+                })
+            });
+
+        let param = matched
+            .ok_or_else(|| format!("No parameter matches name '{}'", req.name))?;
+
+        let id = param
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "Parameter missing id".to_string())? as u32;
+
+        let mirrored = self.shared.mirror_param_immediate(id, req.value);
+        let accepted = self.shared.queue_param_change(id, req.value).is_ok();
+
+        let response = serde_json::json!({
+            "status": if accepted { "queued" } else { "dropped_queue_full" },
+            "id": id,
+            "name": param.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+            "value": req.value,
+            "immediate_applied": mirrored,
+            "queue_len": self.shared.param_queue.len(),
+            "timestamp_ms": now_ms(),
+            "instance_id": self.shared.instance_id.as_str(),
         });
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
     }

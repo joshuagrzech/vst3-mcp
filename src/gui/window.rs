@@ -574,28 +574,47 @@ fn constrain_host_resize(state: &EditorState, requested_w: u32, requested_h: u32
     )
 }
 
+/// Query the actual X11 window geometry. On XWayland/Hyprland, winit's reported
+/// inner_size can differ from the real X11 geometry due to scaling; using the
+/// actual geometry prevents black space around the plugin UI.
+fn x11_parent_geometry(x11: &X11EmbedState) -> Option<(u32, u32)> {
+    let cookie = x11.conn.get_geometry(x11.parent_window_id as Drawable);
+    let reply = cookie.ok()?.reply().ok()?;
+    let w = reply.width.max(1) as u32;
+    let h = reply.height.max(1) as u32;
+    Some((w, h))
+}
+
 /// Notify the plugin view about the current host window size.
 fn notify_plugin_size(state: &mut EditorState, w: u32, h: u32) {
+    // On X11/XWayland, use actual parent geometry when available to fix Hyprland
+    // scaling mismatch (winit inner_size vs real X11 window size).
+    let (size_w, size_h) = if let Some(ref x11) = state.x11 {
+        x11_parent_geometry(x11).unwrap_or((w, h))
+    } else {
+        (w, h)
+    };
+
     let mut rect = ViewRect {
         left: 0,
         top: 0,
-        right: w as i32,
-        bottom: h as i32,
+        right: size_w as i32,
+        bottom: size_h as i32,
     };
     unsafe {
         let result = state.plug_view.onSize(&mut rect);
         if result != kResultOk {
-            debug!("IPlugView::onSize({w}x{h}) returned {result}");
+            debug!("IPlugView::onSize({size_w}x{size_h}) returned {result}");
         }
     }
-    state.current_size = (w, h);
+    state.current_size = (size_w, size_h);
 
     // Keep X11 child window aligned and sized to match the host.
     if let Some(x11) = state.x11.as_mut() {
         if let Some(child) = x11.plugin_window_id {
             if let Ok(cookie) = x11.conn.configure_window(
                 child,
-                &ConfigureWindowAux::new().x(0).y(0).width(w).height(h),
+                &ConfigureWindowAux::new().x(0).y(0).width(size_w).height(size_h),
             ) {
                 let _ = cookie.check();
             }
@@ -659,6 +678,17 @@ fn poll_x11_events(state: &mut EditorState) {
                                     warn!("Failed to send XEMBED_EMBEDDED_NOTIFY: {}", e);
                                 } else {
                                     debug!("Sent XEMBED_EMBEDDED_NOTIFY to {:08X}", child_id);
+                                }
+
+                                // Size child to fill parent (fixes Hyprland/XWayland black space)
+                                if let Some((pw, ph)) = x11_parent_geometry(x11) {
+                                    if let Ok(cookie) = x11.conn.configure_window(
+                                        child_id,
+                                        &ConfigureWindowAux::new().x(0).y(0).width(pw).height(ph),
+                                    ) {
+                                        let _ = cookie.check();
+                                    }
+                                    let _ = x11.conn.flush();
                                 }
 
                                 // Send window activate and focus

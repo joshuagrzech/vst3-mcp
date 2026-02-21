@@ -111,6 +111,31 @@ struct ProxyPreviewVstParameterValuesRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyGetParamInfoRequest {
+    pub instance_id: Option<String>,
+    pub id: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxySavePresetRequest {
+    pub instance_id: Option<String>,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyLoadPresetRequest {
+    pub instance_id: Option<String>,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxySetParamByNameRequest {
+    pub instance_id: Option<String>,
+    pub name: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct GuardAudioRoutingRequest {
     pub user_message: String,
     pub requested_tool: Option<String>,
@@ -745,12 +770,13 @@ impl RouterMcpServer {
             "recommended_route": if block_web_search { "audio_mcp" } else { "web_or_general" },
             "recommended_first_tool": recommended_first_tool,
             "recommended_workflow": [
-                "scan_plugins",
-                "load_plugin",
-                "find_vst_parameter",
-                "preview_vst_parameter_values",
-                "set_param_realtime_or_batch_set_realtime",
-                "save_preset_when_available"
+                "1. scan_plugins",
+                "2. load_plugin (by uid)",
+                "3. find_vst_parameter (search by name/intent)",
+                "4. get_param_info (probe range for a specific id before editing)",
+                "5. preview_vst_parameter_values (confirm current values)",
+                "6. set_param_by_name (if you know the name) OR set_param_realtime/batch_set_realtime/edit_vst_patch (if you know the id)",
+                "7. save_preset (persist to .vstpreset file when done)"
             ],
         });
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
@@ -764,6 +790,56 @@ impl RouterMcpServer {
         let id = self.resolve_instance_id(req.instance_id).await?;
         self.call_wrapper_tool(&id, "wrapper_status", None).await
     }
+
+    #[tool(
+        description = "Get parameter metadata and display range probe by id. Use before setting values to understand the range."
+    )]
+    async fn get_param_info(
+        &self,
+        Parameters(req): Parameters<ProxyGetParamInfoRequest>,
+    ) -> Result<String, String> {
+        let id = self.resolve_instance_id(req.instance_id).await?;
+        let args = serde_json::json!({ "id": req.id }).as_object().cloned();
+        self.call_wrapper_tool(&id, "get_param_info", args).await
+    }
+
+    #[tool(
+        description = "Save current plugin state to a .vstpreset file. Call after patch/preset edits to persist changes."
+    )]
+    async fn save_preset(
+        &self,
+        Parameters(req): Parameters<ProxySavePresetRequest>,
+    ) -> Result<String, String> {
+        let id = self.resolve_instance_id(req.instance_id).await?;
+        let args = serde_json::json!({ "path": req.path }).as_object().cloned();
+        self.call_wrapper_tool(&id, "save_preset", args).await
+    }
+
+    #[tool(
+        description = "Load plugin state from a .vstpreset file. Call load_child_plugin first to ensure the plugin is loaded."
+    )]
+    async fn load_preset(
+        &self,
+        Parameters(req): Parameters<ProxyLoadPresetRequest>,
+    ) -> Result<String, String> {
+        let id = self.resolve_instance_id(req.instance_id).await?;
+        let args = serde_json::json!({ "path": req.path }).as_object().cloned();
+        self.call_wrapper_tool(&id, "load_preset", args).await
+    }
+
+    #[tool(
+        description = "Set a plugin parameter by name instead of numeric id. Uses case-insensitive fuzzy match. Returns resolved id and applied value."
+    )]
+    async fn set_param_by_name(
+        &self,
+        Parameters(req): Parameters<ProxySetParamByNameRequest>,
+    ) -> Result<String, String> {
+        let id = self.resolve_instance_id(req.instance_id).await?;
+        let args = serde_json::json!({ "name": req.name, "value": req.value })
+            .as_object()
+            .cloned();
+        self.call_wrapper_tool(&id, "set_param_by_name", args).await
+    }
 }
 
 #[tool_handler]
@@ -775,7 +851,14 @@ impl ServerHandler for RouterMcpServer {
 Hard routing rule: If user mentions VST/plugin/preset/patch/sound/tone/parameter/knob/automation, use Audio MCP tools first. Do not use web search unless user explicitly asks for docs/news.\n\
 Disambiguation: In audio context, patch = preset/sound configuration, not code diff.\n\
 Run guard_audio_routing before any web search call.\n\
-Recommended workflow: scan_plugins -> load_plugin -> find_vst_parameter (search params) -> preview_vst_parameter_values (probe param) -> set_param_realtime/batch_set_realtime (or edit_vst_patch). Save preset when available."
+Recommended workflow:\n\
+  1. scan_plugins — discover available plugins\n\
+  2. load_plugin — load by UID\n\
+  3. find_vst_parameter — search parameters by natural language\n\
+  4. get_param_info — probe display range for a specific parameter id before editing\n\
+  5. preview_vst_parameter_values — confirm current values for target ids\n\
+  6. set_param_by_name (if you know the name) OR set_param_realtime / batch_set_realtime / edit_vst_patch (if you know the id)\n\
+  7. save_preset — persist to .vstpreset file when satisfied with the sound"
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
