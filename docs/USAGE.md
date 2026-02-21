@@ -95,6 +95,25 @@ systemctl --user enable --now agentaudio-mcp-routerd
 systemctl --user status agentaudio-mcp-routerd
 ```
 
+## Use precompiled binaries with the installer (Linux)
+
+If you want installer convenience but do not want local Rust builds, you can point the GUI installer at precompiled artifacts.
+
+1. Extract your release artifacts into a single directory.
+2. Ensure that directory includes artifacts for the options you enable:
+   - For **Install VST3 wrapper plugin**: `libagentaudio_wrapper_vst3.so` **or** `AgentAudio Wrapper.vst3/Contents/<arch>-linux/AgentAudio Wrapper.so`
+   - For router/client options: `agentaudio-mcp-routerd`, `agentaudio-mcp-stdio`, `agentaudio-mcp`
+3. Start the installer:
+
+```bash
+AGENTAUDIO_INSTALLER_PRECOMPILED_DIR=/path/to/artifacts cargo run --bin agentaudio-installer
+```
+
+4. In the installer UI:
+   - enable **Use precompiled artifacts (skip cargo build)**,
+   - confirm **Precompiled dir** points to your extracted directory,
+   - click **Install**.
+
 ## Build and Test
 
 ```bash

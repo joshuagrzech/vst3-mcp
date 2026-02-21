@@ -58,6 +58,22 @@ cargo run --bin agentaudio-mcp -- uninstall
 
 Cursor is configured to use the stdio shim (`agentaudio-mcp-stdio`) which forwards tool calls to the router daemon over HTTP.
 
+### Use precompiled binaries with the GUI installer (Linux)
+
+If you already have release artifacts and want to skip local Cargo builds:
+
+1. Extract artifacts into one directory (example: `/tmp/agentaudio-release`).
+2. Ensure the directory contains artifacts for the options you enable:
+   - For **Install VST3 wrapper plugin**: `libagentaudio_wrapper_vst3.so` (or `AgentAudio Wrapper.vst3/Contents/<arch>-linux/AgentAudio Wrapper.so`)
+   - For router/client options: `agentaudio-mcp-routerd`, `agentaudio-mcp-stdio`, `agentaudio-mcp`
+3. Launch installer with the directory prefilled:
+
+```bash
+AGENTAUDIO_INSTALLER_PRECOMPILED_DIR=/tmp/agentaudio-release cargo run --bin agentaudio-installer
+```
+
+4. In the installer UI, keep **Use precompiled artifacts (skip cargo build)** checked and click **Install**.
+
 ### Run tests
 
 ```bash
