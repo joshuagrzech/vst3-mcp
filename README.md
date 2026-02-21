@@ -64,6 +64,16 @@ Cursor is configured to use the stdio shim (`agentaudio-mcp-stdio`) which forwar
 cargo test --manifest-path crates/agentaudio-wrapper-vst3/Cargo.toml
 ```
 
+## Build a precompiled installer release bundle
+
+To create a distributable installer package that already includes all required artifacts:
+
+```bash
+./scripts/master-release-installer.sh
+```
+
+The generated bundle (under `dist/`) includes `agentaudio-installer` plus `precompiled-target/release/*`, so installer runs can skip local builds and only perform placement/service/config setup.
+
 ### In DAW
 
 1. Install/bundle the built wrapper plugin.

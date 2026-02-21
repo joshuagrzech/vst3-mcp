@@ -146,6 +146,26 @@ A script `scripts/bundle-vst3.sh` is provided to do steps 2–3 in one go (see s
 ./scripts/build-and-install-vst3.sh release ~/.vst3   # build + bundle + install to ~/.vst3
 ```
 
+## Master release installer bundle (precompiled artifacts)
+
+For shipping a ready-to-run installer package (no compile step on install machine), run:
+
+```bash
+./scripts/master-release-installer.sh
+```
+
+This produces a release directory + tarball under `./dist/` containing:
+- `agentaudio-installer` (GUI installer)
+- `run-installer.sh` launcher
+- `precompiled-target/release/` with all required artifacts:
+  - `libagentaudio_wrapper_vst3.so`
+  - `agent-audio-scanner`
+  - `agentaudio-mcp-routerd`
+  - `agentaudio-mcp-stdio`
+  - `agentaudio-mcp`
+
+When launched from that package, the installer auto-detects `precompiled-target` and defaults to "Skip build", so installation focuses on file placement, service setup, and MCP client config patching.
+
 ## DAW Setup Steps
 
 1. Build wrapper crate and bundle as above.
