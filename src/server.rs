@@ -3,6 +3,7 @@
 //! Exposes plugin scanning, loading, audio processing, and preset management
 //! as MCP tools over stdio transport.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -147,6 +148,13 @@ pub struct FindVstParameterRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListParamsRequest {
+    /// Optional name prefix filter (case-insensitive). Returns only params whose names start with this prefix. Use list_param_groups to discover valid prefixes.
+    #[schemars(description = "Optional name prefix filter (case-insensitive). Use list_param_groups to discover valid prefixes.")]
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PreviewVstParameterValuesRequest {
     /// Optional list of parameter IDs to inspect. If omitted, returns the first `limit` params.
     #[schemars(description = "Optional list of parameter IDs to inspect")]
@@ -175,6 +183,9 @@ pub struct AudioHost {
     editor_close_signal: Arc<std::sync::atomic::AtomicBool>,
     /// Handle to the GUI thread so we can join/detect if it's still alive.
     editor_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// Cached param metadata (id, name, units, step_count). Populated on first find_vst_parameter/list_param_groups call.
+    /// Invalidated on load_plugin/unload_plugin. Avoids re-fetching static metadata on every search.
+    param_cache: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -187,6 +198,7 @@ impl AudioHost {
             scan_cache: Arc::new(Mutex::new(Vec::new())),
             editor_close_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             editor_thread: Arc::new(Mutex::new(None)),
+            param_cache: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
@@ -528,34 +540,36 @@ impl AudioHost {
     }
 
     #[tool(
-        description = "List all writable parameters/knobs with metadata (value, display, units, steps). Use when user says parameter/knob/automation/make brighter/reduce reverb. Call load_plugin first."
+        description = "List all writable parameters/knobs with current values (value, display, units, steps). Supports optional prefix filter to narrow results (e.g. prefix='Reverb'). Use list_param_groups to discover valid prefixes. Call load_plugin first."
     )]
-    fn list_params(&self) -> Result<String, String> {
-        info!("list_params called");
+    fn list_params(&self, Parameters(req): Parameters<ListParamsRequest>) -> Result<String, String> {
+        info!("list_params called (prefix={:?})", req.prefix);
 
-        let plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
-        let plugin = plugin_guard.as_ref().ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+        let mut parameters = self.get_live_params()?;
 
-        let count = plugin.get_parameter_count();
-        let mut parameters = Vec::new();
-
-        for i in 0..count {
-            if let Ok(info) = plugin.get_parameter_info(i) {
-                if info.is_writable() && !info.is_hidden() {
-                    let value = plugin.get_parameter(info.id);
-                    let display = plugin.get_parameter_display(info.id)
-                        .unwrap_or_else(|_| format!("{:.3}", value));
-
-                    parameters.push(serde_json::json!({
-                        "id": info.id,
-                        "name": info.title,
-                        "value": value,
-                        "display": display,
-                        "units": info.units,
-                        "step_count": info.step_count
-                    }));
-                }
+        // Update metadata cache as a side effect (metadata-only, no live values)
+        {
+            let metadata: Vec<serde_json::Value> = parameters.iter().map(|p| {
+                serde_json::json!({
+                    "id": p["id"],
+                    "name": p["name"],
+                    "units": p["units"],
+                    "step_count": p["step_count"],
+                })
+            }).collect();
+            if let Ok(mut cache) = self.param_cache.lock() {
+                *cache = Some(metadata);
             }
+        }
+
+        // Apply optional prefix filter
+        if let Some(ref pfx) = req.prefix {
+            let pfx_lower = pfx.to_lowercase();
+            parameters.retain(|p| {
+                p.get("name").and_then(|v| v.as_str())
+                    .map(|n| n.to_lowercase().starts_with(&pfx_lower))
+                    .unwrap_or(false)
+            });
         }
 
         let response = serde_json::json!({
@@ -563,8 +577,40 @@ impl AudioHost {
             "count": parameters.len(),
         });
 
-        info!("list_params found {} writable parameters", parameters.len());
+        info!("list_params returning {} parameters", parameters.len());
         Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(
+        description = "List logical parameter groups (e.g. 'Reverb', 'Envelope 1', 'Filter 1') with counts. Use before list_params or find_vst_parameter to discover available sections. Use a group name as the prefix in list_params to narrow results. Call load_plugin first."
+    )]
+    fn list_param_groups(&self) -> Result<String, String> {
+        info!("list_param_groups called");
+
+        let metadata = self.get_cached_param_metadata()?;
+        let mut group_counts: HashMap<String, usize> = HashMap::new();
+
+        for param in &metadata {
+            let name = param.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+            let group = param_group_prefix(name);
+            *group_counts.entry(group).or_insert(0) += 1;
+        }
+
+        let mut groups: Vec<serde_json::Value> = group_counts.into_iter().map(|(group, count)| {
+            serde_json::json!({ "group": group, "count": count })
+        }).collect();
+        groups.sort_by(|a, b| {
+            a.get("group").and_then(|v| v.as_str()).unwrap_or_default()
+                .cmp(b.get("group").and_then(|v| v.as_str()).unwrap_or_default())
+        });
+        let group_count = groups.len();
+
+        let response = serde_json::json!({
+            "groups": groups,
+            "count": group_count,
+        });
+        info!("list_param_groups found {} groups", group_count);
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
     }
 
     #[tool(description = "Simulate parameter values to see their display strings (e.g., '100 Hz', 'On') without changing the plugin state.")]
@@ -796,29 +842,36 @@ impl AudioHost {
     }
 
     #[tool(
-        description = "Search plugin parameters by natural language (e.g. 'attack', 'release', 'make brighter', 'reduce reverb')."
+        description = "Search plugin parameters by natural language (e.g. 'attack', 'release', 'make brighter', 'reduce reverb'). Results are ranked by relevance. Uses cached metadata for speed."
     )]
     fn find_vst_parameter(
         &self,
         Parameters(req): Parameters<FindVstParameterRequest>,
     ) -> Result<String, String> {
-        let raw = self.list_params()?;
-        let params = parse_params_from_list_result(&raw)?;
-        let terms = query_terms(&req.query);
+        let params = self.get_cached_param_metadata()?;
+        let source_count = params.len();
+        let (primary, aliases) = query_terms(&req.query);
         let limit = req.limit.unwrap_or(20).max(1);
 
-        let matches: Vec<serde_json::Value> = params
-            .iter()
-            .filter(|p| parameter_matches_query(p, &terms))
-            .take(limit)
-            .cloned()
+        let mut scored: Vec<(u32, serde_json::Value)> = params
+            .into_iter()
+            .filter_map(|p| {
+                let s = score_param(&p, &primary, &aliases);
+                if s > 0 { Some((s, p)) } else { None }
+            })
             .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let matches: Vec<serde_json::Value> = scored.into_iter().take(limit).map(|(_, p)| p).collect();
+
+        let mut all_terms: Vec<String> = primary.iter().chain(aliases.iter()).cloned().collect();
+        all_terms.sort();
+        all_terms.dedup();
 
         let response = serde_json::json!({
             "query": req.query,
-            "terms": terms,
+            "terms": all_terms,
             "count": matches.len(),
-            "source_count": params.len(),
+            "source_count": source_count,
             "matches": matches,
             "next_step": "Use preview_vst_parameter_values, then set_param/batch_set (or edit_vst_patch).",
         });
@@ -832,8 +885,7 @@ impl AudioHost {
         &self,
         Parameters(req): Parameters<PreviewVstParameterValuesRequest>,
     ) -> Result<String, String> {
-        let raw = self.list_params()?;
-        let params = parse_params_from_list_result(&raw)?;
+        let params = self.get_live_params()?;
         let limit = req.limit.unwrap_or(20).max(1);
 
         let selected: Vec<serde_json::Value> = if let Some(ids) = req.ids {
@@ -999,6 +1051,75 @@ impl AudioHost {
         }
     }
 
+    /// Fetch all writable, visible parameters with live values from the plugin.
+    fn get_live_params(&self) -> Result<Vec<serde_json::Value>, String> {
+        let plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let plugin = plugin_guard.as_ref().ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+
+        let count = plugin.get_parameter_count();
+        let mut parameters = Vec::new();
+
+        for i in 0..count {
+            if let Ok(info) = plugin.get_parameter_info(i) {
+                if info.is_writable() && !info.is_hidden() {
+                    let value = plugin.get_parameter(info.id);
+                    let display = plugin.get_parameter_display(info.id)
+                        .unwrap_or_else(|_| format!("{:.3}", value));
+
+                    parameters.push(serde_json::json!({
+                        "id": info.id,
+                        "name": info.title,
+                        "value": value,
+                        "display": display,
+                        "units": info.units,
+                        "step_count": info.step_count
+                    }));
+                }
+            }
+        }
+        Ok(parameters)
+    }
+
+    /// Get parameter metadata (id, name, units, step_count) from cache, or fetch and cache if miss.
+    /// Does not include live values — use get_live_params() when current values are needed.
+    fn get_cached_param_metadata(&self) -> Result<Vec<serde_json::Value>, String> {
+        // Fast path: return from cache
+        {
+            let cache = self.param_cache.lock().map_err(|e| format!("Lock error: {}", e))?;
+            if let Some(ref cached) = *cache {
+                return Ok(cached.clone());
+            }
+        }
+
+        // Cache miss: fetch from plugin (metadata only, no live values)
+        let metadata = {
+            let plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
+            let plugin = plugin_guard.as_ref().ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+
+            let count = plugin.get_parameter_count();
+            let mut meta = Vec::new();
+            for i in 0..count {
+                if let Ok(info) = plugin.get_parameter_info(i) {
+                    if info.is_writable() && !info.is_hidden() {
+                        meta.push(serde_json::json!({
+                            "id": info.id,
+                            "name": info.title,
+                            "units": info.units,
+                            "step_count": info.step_count,
+                        }));
+                    }
+                }
+            }
+            meta
+        };
+
+        // Store in cache
+        if let Ok(mut cache) = self.param_cache.lock() {
+            *cache = Some(metadata.clone());
+        }
+        Ok(metadata)
+    }
+
     /// Internal helper to unload the current plugin and all its resources.
     fn unload_plugin_inner(&self) -> Result<bool, String> {
         // 1. Close the editor window and wait for its thread to terminate.
@@ -1022,6 +1143,9 @@ impl AudioHost {
             }
             if let Ok(mut module_guard) = self.module.lock() {
                 *module_guard = None;
+            }
+            if let Ok(mut cache) = self.param_cache.lock() {
+                *cache = None;
             }
             info!("Plugin unloaded and resources released.");
         }
@@ -1050,69 +1174,64 @@ Use this workflow before web search."
     }
 }
 
-fn query_terms(query: &str) -> Vec<String> {
+/// Returns (primary_terms, alias_terms) separately so scoring can weight them differently.
+fn query_terms(query: &str) -> (Vec<String>, Vec<String>) {
     let lower = query.to_lowercase();
-    let mut terms: Vec<String> = lower
+    let primary: Vec<String> = lower
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|t| !t.is_empty())
         .map(ToString::to_string)
         .collect();
 
+    let mut aliases: Vec<String> = Vec::new();
     if lower.contains("brighter") {
-        terms.extend(
-            ["bright", "brightness", "high", "treble", "presence"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
+        aliases.extend(["bright", "brightness", "treble", "presence"].iter().map(|s| s.to_string()));
     }
     if lower.contains("harsh") {
-        terms.extend(
-            ["harsh", "resonance", "q", "high", "presence"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
+        aliases.extend(["harsh", "resonance", "q", "presence"].iter().map(|s| s.to_string()));
     }
     if lower.contains("reverb") {
-        terms.extend(
-            ["reverb", "decay", "room", "wet", "mix"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
+        // Omit "decay" and "mix" — too ambiguous (match unrelated Envelope/Volume params)
+        aliases.extend(["room", "wet"].iter().map(|s| s.to_string()));
     }
 
-    terms.sort();
-    terms.dedup();
-    terms
+    // Remove aliases that duplicate primary terms
+    aliases.retain(|a| !primary.contains(a));
+    aliases.sort();
+    aliases.dedup();
+    (primary, aliases)
 }
 
-fn parameter_matches_query(param: &serde_json::Value, terms: &[String]) -> bool {
-    if terms.is_empty() {
-        return true;
+/// Score a param against primary and alias terms. Returns 0 if no match.
+/// Higher score = better match. Primary terms outweigh aliases.
+fn score_param(param: &serde_json::Value, primary: &[String], aliases: &[String]) -> u32 {
+    let name = param.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+    let name_words: Vec<&str> = name.split_whitespace().collect();
+    let display = param.get("display").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+    let mut score = 0u32;
+
+    for term in primary {
+        if name_words.iter().any(|w| *w == term.as_str()) { score += 100; }  // exact word in name
+        else if name.starts_with(term.as_str()) { score += 80; }             // name prefix
+        else if name.contains(term.as_str()) { score += 40; }               // substring in name
+        if display.contains(term.as_str()) { score += 5; }                   // in display value
     }
-
-    let name = param
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_lowercase();
-    let display = param
-        .get("display")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_lowercase();
-    let haystack = format!("{name} {display}");
-
-    terms.iter().any(|term| haystack.contains(term))
+    for term in aliases {
+        if name_words.iter().any(|w| *w == term.as_str()) { score += 10; }
+        else if name.contains(term.as_str()) { score += 3; }
+    }
+    score
 }
 
-fn parse_params_from_list_result(raw: &str) -> Result<Vec<serde_json::Value>, String> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("Failed to parse list_params JSON: {e}"))?;
-    let params = parsed
-        .get("parameters")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| "list_params response is missing a 'parameters' array".to_string())?;
-    Ok(params.clone())
+/// Extract the group prefix from a parameter name.
+/// Rule: if second word is a number → group = "Word1 N"; else group = "Word1".
+fn param_group_prefix(name: &str) -> String {
+    let parts: Vec<&str> = name.splitn(3, ' ').collect();
+    if parts.len() >= 2 && parts[1].parse::<u32>().is_ok() {
+        format!("{} {}", parts[0], parts[1])
+    } else {
+        parts[0].to_string()
+    }
 }
 
 /// Convert a 32-character hex string to a 16-byte TUID.
