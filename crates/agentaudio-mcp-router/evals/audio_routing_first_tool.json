@@ -1,0 +1,152 @@
+[
+  {
+    "prompt": "Edit patch in Serum",
+    "expected_block_web_search": true,
+    "expected_first_tool": "scan_plugins"
+  },
+  {
+    "prompt": "Make FabFilter Pro-Q less harsh",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "Change attack/release in the compressor plugin",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "Find the knob that controls reverb mix",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "Automate cutoff on this synth",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "Load a VST plugin and tweak the tone",
+    "expected_block_web_search": true,
+    "expected_first_tool": "scan_plugins"
+  },
+  {
+    "prompt": "Patch this preset so it sounds brighter",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "Can you reduce reverb on my plugin patch?",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "Set the resonance and cutoff for this sound",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "I want this plugin preset to be warmer",
+    "expected_block_web_search": true,
+    "expected_first_tool": "scan_plugins"
+  },
+  {
+    "prompt": "Tune the EQ parameters in this VST",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "Open the plugin and edit the patch",
+    "expected_block_web_search": true,
+    "expected_first_tool": "scan_plugins"
+  },
+  {
+    "prompt": "Find docs for Serum wavetable import",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  },
+  {
+    "prompt": "Show me the latest FabFilter news",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  },
+  {
+    "prompt": "What are the release notes for this compressor plugin?",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  },
+  {
+    "prompt": "Read the documentation for Pro-Q dynamic EQ",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  },
+  {
+    "prompt": "Any blog post about new VST automation features?",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  },
+  {
+    "prompt": "Review this git patch and explain it",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  },
+  {
+    "prompt": "Apply patch to this Rust file",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  },
+  {
+    "prompt": "Can you inspect this .diff from my pull request?",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  },
+  {
+    "prompt": "Write a commit message for this code patch",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  },
+  {
+    "prompt": "Make the snare bus plugin punchier",
+    "expected_block_web_search": true,
+    "expected_first_tool": "scan_plugins"
+  },
+  {
+    "prompt": "Find the parameter for stereo width",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "Adjust compressor attack to be slower",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "Lower reverb decay on this preset",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "Increase automation depth on the filter knob",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "I need a new sound in my synth plugin",
+    "expected_block_web_search": true,
+    "expected_first_tool": "scan_plugins"
+  },
+  {
+    "prompt": "Help me tweak parameter values for a less harsh tone",
+    "expected_block_web_search": true,
+    "expected_first_tool": "find_vst_parameter"
+  },
+  {
+    "prompt": "What is the API reference for VST parameter automation?",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  },
+  {
+    "prompt": "Get me news about Serum 2 release",
+    "expected_block_web_search": false,
+    "expected_first_tool": "none"
+  }
+]

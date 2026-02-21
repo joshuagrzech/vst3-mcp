@@ -222,7 +222,10 @@ impl SharedState {
                 .map_err(|e| format!("Lock error: {e}"))?;
             if let Some(handle) = editor.thread.as_ref() {
                 if handle.is_finished() {
-                    return Err("Editor event loop stopped unexpectedly; reload the wrapper to recover".to_string());
+                    return Err(
+                        "Editor event loop stopped unexpectedly; reload the wrapper to recover"
+                            .to_string(),
+                    );
                 }
 
                 if let Ok(mut name) = editor.plugin_name.write() {
@@ -495,6 +498,18 @@ struct BatchSetRequest {
     pub changes: Vec<ParamChange>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct FindVstParameterRequest {
+    pub query: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct PreviewVstParameterValuesRequest {
+    pub ids: Option<Vec<u32>>,
+    pub limit: Option<usize>,
+}
+
 #[derive(Default)]
 struct GuiState {
     /// User-entered path to a .vst3 bundle (e.g. /usr/lib/vst3/MyPlugin.vst3 or ~/.vst3/Synth.vst3)
@@ -533,7 +548,9 @@ impl WrapperMcpServer {
 
 #[tool_router]
 impl WrapperMcpServer {
-    #[tool(description = "Scan installed VST3 plugins for child-hosting")]
+    #[tool(
+        description = "Scan installed VST plugins. Use first when user says plugin/VST/synth/preset/patch/sound/tone."
+    )]
     fn scan_plugins(
         &self,
         Parameters(req): Parameters<ScanPluginsRequest>,
@@ -542,7 +559,9 @@ impl WrapperMcpServer {
         serde_json::to_string_pretty(&plugins).map_err(|e| format!("Serialization failed: {e}"))
     }
 
-    #[tool(description = "Load a child VST3 by path to a .vst3 bundle. No system-wide scan.")]
+    #[tool(
+        description = "Load a child VST plugin by path to a .vst3 bundle. Useful when user requests a specific plugin file."
+    )]
     fn load_child_plugin_by_path(
         &self,
         Parameters(req): Parameters<LoadChildByPathRequest>,
@@ -563,7 +582,7 @@ impl WrapperMcpServer {
     }
 
     #[tool(
-        description = "Load a child VST3 by UID (requires scan_plugins or load_child_plugin_by_path first to populate cache)."
+        description = "Load a child VST plugin by UID (requires scan_plugins or load_child_plugin_by_path first)."
     )]
     fn load_child_plugin(
         &self,
@@ -581,6 +600,11 @@ impl WrapperMcpServer {
             "instance_id": self.shared.instance_id.as_str(),
         });
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(description = "Alias for load_child_plugin. Natural-language 'load plugin' name.")]
+    fn load_plugin(&self, Parameters(req): Parameters<LoadChildRequest>) -> Result<String, String> {
+        self.load_child_plugin(Parameters(req))
     }
 
     #[tool(description = "Unload current child plugin.")]
@@ -606,7 +630,9 @@ impl WrapperMcpServer {
         serde_json::to_string(&response).map_err(|e| format!("Serialization failed: {e}"))
     }
 
-    #[tool(description = "List writable child plugin parameters and current values.")]
+    #[tool(
+        description = "List writable plugin parameters/knobs and current values. Use for parameter/knob/automation/tone edits."
+    )]
     fn list_params(&self) -> Result<String, String> {
         self.with_child_plugin(|plugin| {
             let count = plugin.get_parameter_count();
@@ -637,7 +663,7 @@ impl WrapperMcpServer {
         })
     }
 
-    #[tool(description = "Queue a realtime parameter update for audio-thread application.")]
+    #[tool(description = "Queue one realtime parameter update for a single knob/parameter change.")]
     fn set_param_realtime(
         &self,
         Parameters(req): Parameters<SetParamRequest>,
@@ -662,7 +688,9 @@ impl WrapperMcpServer {
         serde_json::to_string(&response).map_err(|e| format!("Serialization failed: {e}"))
     }
 
-    #[tool(description = "Queue multiple realtime parameter updates for audio-thread application.")]
+    #[tool(
+        description = "Queue multiple realtime parameter updates for coordinated patch/preset/tone edits."
+    )]
     fn batch_set_realtime(
         &self,
         Parameters(req): Parameters<BatchSetRequest>,
@@ -701,6 +729,80 @@ impl WrapperMcpServer {
             "instance_id": self.shared.instance_id.as_str(),
         });
         serde_json::to_string(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(
+        description = "Alias for batch_set_realtime. Edit VST patch/preset/sound by applying multiple parameter changes."
+    )]
+    fn edit_vst_patch(
+        &self,
+        Parameters(req): Parameters<BatchSetRequest>,
+    ) -> Result<String, String> {
+        self.batch_set_realtime(Parameters(req))
+    }
+
+    #[tool(
+        description = "Search plugin parameters by natural language (e.g. 'attack', 'release', 'make brighter', 'reduce reverb')."
+    )]
+    fn find_vst_parameter(
+        &self,
+        Parameters(req): Parameters<FindVstParameterRequest>,
+    ) -> Result<String, String> {
+        let raw = self.list_params()?;
+        let params = parse_params_from_list_result(&raw)?;
+        let terms = query_terms(&req.query);
+        let limit = req.limit.unwrap_or(20).max(1);
+
+        let matches: Vec<serde_json::Value> = params
+            .iter()
+            .filter(|p| parameter_matches_query(p, &terms))
+            .take(limit)
+            .cloned()
+            .collect();
+
+        let response = serde_json::json!({
+            "query": req.query,
+            "terms": terms,
+            "count": matches.len(),
+            "source_count": params.len(),
+            "matches": matches,
+            "next_step": "Use preview_vst_parameter_values, then set_param_realtime/batch_set_realtime (or edit_vst_patch).",
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(
+        description = "Preview current values for selected parameter IDs before editing a patch/preset/tone. If ids are omitted, returns first N parameters."
+    )]
+    fn preview_vst_parameter_values(
+        &self,
+        Parameters(req): Parameters<PreviewVstParameterValuesRequest>,
+    ) -> Result<String, String> {
+        let raw = self.list_params()?;
+        let params = parse_params_from_list_result(&raw)?;
+        let limit = req.limit.unwrap_or(20).max(1);
+
+        let selected: Vec<serde_json::Value> = if let Some(ids) = req.ids {
+            params
+                .iter()
+                .filter(|p| {
+                    p.get("id")
+                        .and_then(|v| v.as_u64())
+                        .map(|id| ids.contains(&(id as u32)))
+                        .unwrap_or(false)
+                })
+                .take(limit)
+                .cloned()
+                .collect()
+        } else {
+            params.iter().take(limit).cloned().collect()
+        };
+
+        let response = serde_json::json!({
+            "count": selected.len(),
+            "values": selected,
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
     }
 
     #[tool(description = "Get wrapper status and endpoint details.")]
@@ -742,7 +844,10 @@ impl ServerHandler for WrapperMcpServer {
         ServerInfo {
             instructions: Some(
                 format!(
-                    "{} realtime wrapper server (instance {}). Load a child plugin, then use set_param_realtime/batch_set_realtime.",
+                    "{} realtime wrapper server (instance {}).\n\
+Hard routing rule: If user mentions VST/plugin/preset/patch/sound/tone/parameter/knob/automation, use Audio MCP tools first. Do not use web search unless user explicitly asks for docs/news.\n\
+Disambiguation: In audio context, patch = preset/sound configuration, not code diff.\n\
+Workflow: scan_plugins -> load_plugin -> find_vst_parameter -> preview_vst_parameter_values -> set_param_realtime/batch_set_realtime (or edit_vst_patch).",
                     self.shared.mcp_name(),
                     self.shared.instance_id
                 )
@@ -1298,6 +1403,71 @@ fn hex_to_tuid(hex: &str) -> Result<[i8; 16], String> {
         tuid[i] = byte as i8;
     }
     Ok(tuid)
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    let lower = query.to_lowercase();
+    let mut terms: Vec<String> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    if lower.contains("brighter") {
+        terms.extend(
+            ["bright", "brightness", "high", "treble", "presence"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+    }
+    if lower.contains("harsh") {
+        terms.extend(
+            ["harsh", "resonance", "q", "high", "presence"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+    }
+    if lower.contains("reverb") {
+        terms.extend(
+            ["reverb", "decay", "room", "wet", "mix"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+    }
+
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn parameter_matches_query(param: &serde_json::Value, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+
+    let name = param
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let display = param
+        .get("display")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let haystack = format!("{name} {display}");
+
+    terms.iter().any(|term| haystack.contains(term))
+}
+
+fn parse_params_from_list_result(raw: &str) -> Result<Vec<serde_json::Value>, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("Failed to parse list_params JSON: {e}"))?;
+    let params = parsed
+        .get("parameters")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "list_params response is missing a 'parameters' array".to_string())?;
+    Ok(params.clone())
 }
 
 #[cfg(test)]

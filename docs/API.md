@@ -88,6 +88,27 @@ Response includes:
 - `timestamp_ms`
 - `instance_id`
 
+### High-level alias tools (router + stdio shim, and wrapper direct)
+
+These are natural-language aliases to improve tool selection from prompts:
+
+- `load_plugin` (alias of `load_child_plugin`)
+- `edit_vst_patch` (alias of `batch_set_realtime`)
+- `find_vst_parameter` (NL search over `list_params`)
+- `preview_vst_parameter_values` (inspect current values before editing)
+
+### `guard_audio_routing` (router + stdio shim)
+
+Deterministic intent guardrail for orchestrators before WebSearch:
+
+- Input: `user_message`, optional `requested_tool`
+- Output: `audio_intent_confidence`, `block_web_search`, `recommended_first_tool`, etc.
+
+Rule:
+
+- If audio intent confidence is above threshold and the user did **not** explicitly ask for docs/news, block web search and route to Audio MCP tools first.
+- In audio context, “patch” means preset/sound configuration (not code diff).
+
 ## Legacy Offline Host MCP (Secondary)
 
 Available via `vst3-mcp-host` stdio transport:

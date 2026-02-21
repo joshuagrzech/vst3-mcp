@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
-use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
+use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
 use tracing::{debug, info, warn};
 
 use vst3_mcp_host::audio;
@@ -98,6 +98,26 @@ pub struct BatchSetRequest {
     pub changes: Vec<ParamChange>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindVstParameterRequest {
+    /// Natural-language parameter query (e.g. "attack", "make brighter", "reduce reverb").
+    #[schemars(description = "Natural-language parameter query")]
+    pub query: String,
+    /// Maximum number of matches to return (default 20).
+    #[schemars(description = "Maximum number of matches to return (default 20)")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PreviewVstParameterValuesRequest {
+    /// Optional list of parameter IDs to inspect. If omitted, returns the first `limit` params.
+    #[schemars(description = "Optional list of parameter IDs to inspect")]
+    pub ids: Option<Vec<u32>>,
+    /// Maximum number of values to return (default 20).
+    #[schemars(description = "Maximum number of values to return (default 20)")]
+    pub limit: Option<usize>,
+}
+
 // -- AudioHost MCP server --
 
 /// MCP server that hosts VST3 plugins for audio processing.
@@ -136,7 +156,9 @@ impl AudioHost {
 
 #[tool_router]
 impl AudioHost {
-    #[tool(description = "Unload the currently loaded plugin, closing its editor. This is called automatically by load_plugin.")]
+    #[tool(
+        description = "Unload the currently loaded plugin, closing its editor. This is called automatically by load_plugin."
+    )]
     fn unload_plugin(&self) -> Result<String, String> {
         info!("unload_plugin called");
         let was_loaded = self.unload_plugin_inner()?;
@@ -151,7 +173,9 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "Scan for installed VST3 plugins and return a list with UIDs, names, vendors, and categories")]
+    #[tool(
+        description = "Scan installed VST3 plugins. Use first when user says plugin/VST/synth/preset/patch/sound/tone."
+    )]
     fn scan_plugins(
         &self,
         Parameters(req): Parameters<ScanPluginsRequest>,
@@ -173,7 +197,9 @@ impl AudioHost {
         Ok(json)
     }
 
-    #[tool(description = "Load a VST3 plugin by its UID from scan results. Call scan_plugins first to discover available plugins.")]
+    #[tool(
+        description = "Load a VST3 plugin by UID from scan results. Use for requests like 'load plugin', 'open Serum', or 'edit this preset'."
+    )]
     fn load_plugin(
         &self,
         Parameters(req): Parameters<LoadPluginRequest>,
@@ -191,7 +217,10 @@ impl AudioHost {
 
         // Find the plugin in scan cache
         let plugin_info = {
-            let cache = self.scan_cache.lock().map_err(|e| format!("Lock error: {}", e))?;
+            let cache = self
+                .scan_cache
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
             cache
                 .iter()
                 .find(|p| p.uid.to_uppercase() == uid_upper)
@@ -202,8 +231,8 @@ impl AudioHost {
             Some(info) => info,
             None => {
                 // Try a fresh scan
-                let plugins = scanner::scan_plugins(None)
-                    .map_err(|e| format!("Scan failed: {}", e))?;
+                let plugins =
+                    scanner::scan_plugins(None).map_err(|e| format!("Scan failed: {}", e))?;
 
                 if let Ok(mut cache) = self.scan_cache.lock() {
                     *cache = plugins.clone();
@@ -228,8 +257,7 @@ impl AudioHost {
         );
 
         // Parse the UID hex string to TUID bytes
-        let class_id = hex_to_tuid(&uid_upper)
-            .map_err(|e| format!("Invalid UID format: {}", e))?;
+        let class_id = hex_to_tuid(&uid_upper).map_err(|e| format!("Invalid UID format: {}", e))?;
 
         // Create host objects (HostApp::new() and ComponentHandler::new()
         // already return ComWrapper<T>)
@@ -237,8 +265,9 @@ impl AudioHost {
         let handler = ComponentHandler::new();
 
         // Create plugin instance from factory (takes Arc<VstModule>)
-        let mut instance = PluginInstance::from_factory(Arc::clone(&module), &class_id, host_app, handler)
-            .map_err(|e| format!("Failed to create plugin instance: {}", e))?;
+        let mut instance =
+            PluginInstance::from_factory(Arc::clone(&module), &class_id, host_app, handler)
+                .map_err(|e| format!("Failed to create plugin instance: {}", e))?;
 
         // Setup, activate, start processing
         instance
@@ -259,15 +288,24 @@ impl AudioHost {
 
         // Store the module and plugin
         {
-            let mut m = self.module.lock().map_err(|e| format!("Lock error: {}", e))?;
+            let mut m = self
+                .module
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
             *m = Some(module);
         }
         {
-            let mut p = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
+            let mut p = self
+                .plugin
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
             *p = Some(instance);
         }
         {
-            let mut pi = self.plugin_info.lock().map_err(|e| format!("Lock error: {}", e))?;
+            let mut pi = self
+                .plugin_info
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
             *pi = Some(info.clone());
         }
 
@@ -285,7 +323,9 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "Process an audio file through the loaded VST3 plugin. Outputs a WAV file. Call load_plugin first.")]
+    #[tool(
+        description = "Process an audio file through the loaded VST3 plugin. Outputs a WAV file. Call load_plugin first."
+    )]
     fn process_audio(
         &self,
         Parameters(req): Parameters<ProcessAudioRequest>,
@@ -319,11 +359,14 @@ impl AudioHost {
         // but input file is 48000, etc.)
         // Sample rate mismatch is a hard error -- processing at the wrong rate
         // produces incorrect output (pitch shift, wrong time-based effects).
-        plugin.re_setup(decoded.sample_rate as f64, 4096)
-            .map_err(|e| format!(
-                "Plugin does not support sample rate {} Hz: {}",
-                decoded.sample_rate, e
-            ))?;
+        plugin
+            .re_setup(decoded.sample_rate as f64, 4096)
+            .map_err(|e| {
+                format!(
+                    "Plugin does not support sample rate {} Hz: {}",
+                    decoded.sample_rate, e
+                )
+            })?;
 
         // Render through plugin
         let output_samples = audio::process::render_offline(plugin, &decoded)
@@ -360,7 +403,9 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "Save the current plugin state as a .vstpreset file. Call load_plugin first.")]
+    #[tool(
+        description = "Save the current plugin state as a .vstpreset file. Use after patch/preset/tone edits."
+    )]
     fn save_preset(
         &self,
         Parameters(req): Parameters<SavePresetRequest>,
@@ -389,7 +434,9 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "Load a .vstpreset file into the currently loaded plugin. Call load_plugin first.")]
+    #[tool(
+        description = "Load a .vstpreset file into the currently loaded plugin. Call load_plugin first."
+    )]
     fn load_preset(
         &self,
         Parameters(req): Parameters<LoadPresetRequest>,
@@ -418,7 +465,9 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "Get the loaded plugin's identity (classId, name, vendor). Call load_plugin first.")]
+    #[tool(
+        description = "Get the loaded plugin's identity (classId, name, vendor). Call load_plugin first."
+    )]
     fn get_plugin_info(&self) -> Result<String, String> {
         info!("get_plugin_info called");
 
@@ -440,7 +489,9 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "List all writable parameters with current values. Returns parameter ID, name, value, and display string for each. Call load_plugin first.")]
+    #[tool(
+        description = "List all writable parameters/knobs with current values. Use when user says parameter/knob/automation/make brighter/reduce reverb."
+    )]
     fn list_params(&self) -> Result<String, String> {
         info!("list_params called");
 
@@ -484,11 +535,10 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "Get a single parameter's current value and display string. Call load_plugin first.")]
-    fn get_param(
-        &self,
-        Parameters(req): Parameters<GetParamRequest>,
-    ) -> Result<String, String> {
+    #[tool(
+        description = "Get a single parameter's current value and display string. Call load_plugin first."
+    )]
+    fn get_param(&self, Parameters(req): Parameters<GetParamRequest>) -> Result<String, String> {
         info!("get_param called for id: {}", req.id);
 
         let plugin_guard = self
@@ -514,11 +564,10 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "Set a parameter value. Changes are queued and applied in next process_audio call. Value must be in range [0.0, 1.0]. Call load_plugin first.")]
-    fn set_param(
-        &self,
-        Parameters(req): Parameters<SetParamRequest>,
-    ) -> Result<String, String> {
+    #[tool(
+        description = "Set one parameter value (single knob tweak). Value must be in [0.0, 1.0]."
+    )]
+    fn set_param(&self, Parameters(req): Parameters<SetParamRequest>) -> Result<String, String> {
         info!("set_param called: id={}, value={}", req.id, req.value);
 
         // Validate value range
@@ -551,15 +600,17 @@ impl AudioHost {
             "display": display_str,
         });
 
-        info!("Parameter {} queued: {} ({})", req.id, req.value, display_str);
+        info!(
+            "Parameter {} queued: {} ({})",
+            req.id, req.value, display_str
+        );
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "Set multiple parameters atomically. All values must be in range [0.0, 1.0]. Changes are queued and applied in next process_audio call. Call load_plugin first.")]
-    fn batch_set(
-        &self,
-        Parameters(req): Parameters<BatchSetRequest>,
-    ) -> Result<String, String> {
+    #[tool(
+        description = "Set multiple parameters atomically for coordinated tone/patch/preset edits. Values must be in [0.0, 1.0]."
+    )]
+    fn batch_set(&self, Parameters(req): Parameters<BatchSetRequest>) -> Result<String, String> {
         info!("batch_set called with {} changes", req.changes.len());
 
         // Validate all changes first
@@ -595,7 +646,81 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "Open the plugin's graphical editor window. Returns immediately once the editor is visible; the window stays open in the background. If an editor is already open it will be closed first. Call load_plugin first.")]
+    #[tool(description = "Alias for batch_set. Edit VST patch/preset/sound via parameter changes.")]
+    fn edit_vst_patch(
+        &self,
+        Parameters(req): Parameters<BatchSetRequest>,
+    ) -> Result<String, String> {
+        self.batch_set(Parameters(req))
+    }
+
+    #[tool(
+        description = "Search plugin parameters by natural language (e.g. 'attack', 'release', 'make brighter', 'reduce reverb')."
+    )]
+    fn find_vst_parameter(
+        &self,
+        Parameters(req): Parameters<FindVstParameterRequest>,
+    ) -> Result<String, String> {
+        let raw = self.list_params()?;
+        let params = parse_params_from_list_result(&raw)?;
+        let terms = query_terms(&req.query);
+        let limit = req.limit.unwrap_or(20).max(1);
+
+        let matches: Vec<serde_json::Value> = params
+            .iter()
+            .filter(|p| parameter_matches_query(p, &terms))
+            .take(limit)
+            .cloned()
+            .collect();
+
+        let response = serde_json::json!({
+            "query": req.query,
+            "terms": terms,
+            "count": matches.len(),
+            "source_count": params.len(),
+            "matches": matches,
+            "next_step": "Use preview_vst_parameter_values, then set_param/batch_set (or edit_vst_patch).",
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(
+        description = "Preview current values for selected parameter IDs before editing a patch/preset/tone. If ids are omitted, returns first N parameters."
+    )]
+    fn preview_vst_parameter_values(
+        &self,
+        Parameters(req): Parameters<PreviewVstParameterValuesRequest>,
+    ) -> Result<String, String> {
+        let raw = self.list_params()?;
+        let params = parse_params_from_list_result(&raw)?;
+        let limit = req.limit.unwrap_or(20).max(1);
+
+        let selected: Vec<serde_json::Value> = if let Some(ids) = req.ids {
+            params
+                .iter()
+                .filter(|p| {
+                    p.get("id")
+                        .and_then(|v| v.as_u64())
+                        .map(|id| ids.contains(&(id as u32)))
+                        .unwrap_or(false)
+                })
+                .take(limit)
+                .cloned()
+                .collect()
+        } else {
+            params.iter().take(limit).cloned().collect()
+        };
+
+        let response = serde_json::json!({
+            "count": selected.len(),
+            "values": selected,
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(
+        description = "Open the plugin's graphical editor window. Returns immediately once the editor is visible; the window stays open in the background. If an editor is already open it will be closed first. Call load_plugin first."
+    )]
     fn open_editor(&self) -> Result<String, String> {
         info!("open_editor called");
 
@@ -686,7 +811,9 @@ impl AudioHost {
         }
     }
 
-    #[tool(description = "Close the plugin's graphical editor window. Safe to call even if no editor is open.")]
+    #[tool(
+        description = "Close the plugin's graphical editor window. Safe to call even if no editor is open."
+    )]
     fn close_editor(&self) -> Result<String, String> {
         info!("close_editor called");
         let was_open = self.close_editor_inner();
@@ -767,14 +894,82 @@ impl ServerHandler for AudioHost {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "VST3 audio processing host. Scan for plugins, load one, \
-                 process audio files through it, and manage presets."
+                "VST3 audio processing host.\n\
+Hard routing rule: If user mentions VST/plugin/preset/patch/sound/tone/parameter/knob/automation, use Audio MCP tools first. Do not use web search unless user explicitly asks for docs/news.\n\
+Disambiguation: In audio context, patch = preset/sound configuration, not code diff.\n\
+Workflow: scan_plugins -> load_plugin -> find_vst_parameter (search params) -> preview_vst_parameter_values (probe param) -> set_param/batch_set (or edit_vst_patch) -> save_preset.\n\
+Use this workflow before web search."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
     }
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    let lower = query.to_lowercase();
+    let mut terms: Vec<String> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    if lower.contains("brighter") {
+        terms.extend(
+            ["bright", "brightness", "high", "treble", "presence"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+    }
+    if lower.contains("harsh") {
+        terms.extend(
+            ["harsh", "resonance", "q", "high", "presence"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+    }
+    if lower.contains("reverb") {
+        terms.extend(
+            ["reverb", "decay", "room", "wet", "mix"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+    }
+
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn parameter_matches_query(param: &serde_json::Value, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+
+    let name = param
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let display = param
+        .get("display")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let haystack = format!("{name} {display}");
+
+    terms.iter().any(|term| haystack.contains(term))
+}
+
+fn parse_params_from_list_result(raw: &str) -> Result<Vec<serde_json::Value>, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("Failed to parse list_params JSON: {e}"))?;
+    let params = parsed
+        .get("parameters")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "list_params response is missing a 'parameters' array".to_string())?;
+    Ok(params.clone())
 }
 
 /// Convert a 32-character hex string to a 16-byte TUID.

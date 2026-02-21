@@ -182,14 +182,21 @@ Each wrapper instance runs its own MCP endpoint:
 
 ## Recommended Prompting Pattern for LLMs
 
+Use this hard routing rule in your client/system prompt:
+
+> If user mentions VST/plugin/preset/patch/sound/tone/parameter/knob/automation, use Audio MCP tools first. Do not use web search unless user explicitly asks for docs/news. In audio context, patch = preset/sound configuration, not code diff.
+
+If your orchestrator supports it, call `guard_audio_routing` before any web search call and follow `block_web_search` + `recommended_first_tool`.
+
 Use this sequence:
 
 1. `wrapper_status`
 2. `scan_plugins`
-3. `load_child_plugin`
-4. `list_params`
-5. Repeated `set_param_realtime` / `batch_set_realtime`
-6. Optional: `open_child_editor` / `close_child_editor`
+3. `load_plugin` (alias of `load_child_plugin`)
+4. `find_vst_parameter` (alias for natural-language parameter search)
+5. `preview_vst_parameter_values`
+6. Repeated `set_param_realtime` / `batch_set_realtime` (or `edit_vst_patch`)
+7. Optional: `open_child_editor` / `close_child_editor`
 
 ## Troubleshooting
 
