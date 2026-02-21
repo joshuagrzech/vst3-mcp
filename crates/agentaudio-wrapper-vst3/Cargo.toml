@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 axum = "0.8"
 crossbeam-queue = "0.3.12"
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
-nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 rmcp = { version = "0.15.0", features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }

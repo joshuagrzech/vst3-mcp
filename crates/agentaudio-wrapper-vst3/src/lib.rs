@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossbeam_queue::ArrayQueue;
 use nih_plug::prelude::*;
-use nih_plug_egui::{EguiState, create_egui_editor, egui};
+use nih_plug_vizia::{ViziaState, ViziaTheming, create_vizia_editor, vizia::prelude::*};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
@@ -69,13 +69,13 @@ fn find_scanner_binary() -> Option<PathBuf> {
 #[derive(Params)]
 struct WrapperParams {
     #[persist = "editor-state"]
-    editor_state: Arc<EguiState>,
+    editor_state: Arc<ViziaState>,
 }
 
 impl Default for WrapperParams {
     fn default() -> Self {
         Self {
-            editor_state: EguiState::from_size(560, 420),
+            editor_state: ViziaState::new(|| (560, 420)),
         }
     }
 }
@@ -531,12 +531,20 @@ struct SetParamByNameRequest {
     pub value: f64,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct GuiState {
     /// User-entered path to a .vst3 bundle (e.g. /usr/lib/vst3/MyPlugin.vst3 or ~/.vst3/Synth.vst3)
     plugin_path: String,
     message: String,
 }
+
+#[derive(Lens, Clone)]
+struct EditorData {
+    shared: SharedState,
+    gui_state: Arc<Mutex<GuiState>>,
+}
+
+impl Model for EditorData {}
 
 struct WrapperMcpServer {
     shared: SharedState,
@@ -1226,122 +1234,21 @@ impl Plugin for AgentAudioWrapper {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        let params = self.params.clone();
         let shared = self.shared.clone();
         let gui_state = Arc::clone(&self.gui_state);
-        create_egui_editor(
+        let data = EditorData {
+            shared,
+            gui_state,
+        };
+
+        create_vizia_editor(
             self.params.editor_state.clone(),
-            (),
-            |_, _| {},
-            move |ctx, _setter, _state| {
-                egui::Window::new("AgentAudio Wrapper").show(ctx, |ui| {
-                    ui.label(format!("Instance: {}", shared.instance_id));
-                    ui.label(format!("MCP Name: {}", shared.mcp_name()));
-                    ui.monospace(
-                        shared
-                            .endpoint()
-                            .unwrap_or_else(|| "MCP endpoint starting...".to_string()),
-                    );
-                    ui.separator();
-
-                    ui.label("VST3 bundle path (e.g. ~/.vst3/MyPlugin.vst3):");
-                    {
-                        let mut path = gui_state
-                            .lock()
-                            .ok()
-                            .map(|gs| gs.plugin_path.clone())
-                            .unwrap_or_default();
-                        if ui.text_edit_singleline(&mut path).changed() {
-                            if let Ok(mut gs) = gui_state.lock() {
-                                gs.plugin_path = path;
-                            }
-                        }
-                    }
-
-                    let path = gui_state.lock().ok().and_then(|gs| {
-                        let p = gs.plugin_path.trim();
-                        if p.is_empty() {
-                            None
-                        } else {
-                            Some(p.to_string())
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        if ui.button("Load from path").clicked() {
-                            let msg = if let Some(p) = path {
-                                let expanded = expand_tilde(&p);
-                                match shared.load_child_plugin_by_path(&expanded) {
-                                    Ok(info) => {
-                                        let _ = shared.open_editor();
-                                        format!("Loaded {}", info.name)
-                                    }
-                                    Err(e) => format!("Load failed: {e}"),
-                                }
-                            } else {
-                                "Enter a path to a .vst3 bundle".to_string()
-                            };
-                            if let Ok(mut gs) = gui_state.lock() {
-                                gs.message = msg;
-                            }
-                        }
-                        if ui.button("Unload Child").clicked() {
-                            let msg = match shared.unload_child_plugin() {
-                                Ok(()) => "Child plugin unloaded".to_string(),
-                                Err(e) => format!("Unload failed: {e}"),
-                            };
-                            if let Ok(mut gs) = gui_state.lock() {
-                                gs.message = msg;
-                            }
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        if ui.button("Open Child Editor").clicked() {
-                            let msg = match shared.open_editor() {
-                                Ok(()) => "Editor opened".to_string(),
-                                Err(e) => format!("Open editor failed: {e}"),
-                            };
-                            if let Ok(mut gs) = gui_state.lock() {
-                                gs.message = msg;
-                            }
-                        }
-                        if ui.button("Close Child Editor").clicked() {
-                            let closed = shared.close_editor();
-                            if let Ok(mut gs) = gui_state.lock() {
-                                gs.message = if closed {
-                                    "Editor closed".to_string()
-                                } else {
-                                    "Editor was not open".to_string()
-                                };
-                            }
-                        }
-                    });
-
-                    if let Some(loaded) = shared.loaded_info.read().ok().and_then(|v| v.clone()) {
-                        ui.label(format!("Loaded: {} ({})", loaded.name, loaded.vendor));
-                    } else {
-                        ui.label("Loaded: none");
-                    }
-
-                    let message = gui_state
-                        .lock()
-                        .ok()
-                        .map(|g| g.message.clone())
-                        .unwrap_or_default();
-                    if !message.is_empty() {
-                        ui.separator();
-                        ui.label(message);
-                    }
-                    ui.label(format!("Queue size: {}", shared.param_queue.len()));
-                    ui.label(format!(
-                        "GUI open: {}",
-                        if params.editor_state.is_open() {
-                            "yes"
-                        } else {
-                            "no"
-                        }
-                    ));
+            ViziaTheming::Custom,
+            move |cx, _| {
+                data.clone().build(cx);
+                
+                VStack::new(cx, |cx| {
+                    Label::new(cx, "Migration in progress...");
                 });
             },
         )
