@@ -920,7 +920,7 @@ impl PersistentEditorApp {
             return;
         }
         if self.close_signal.load(std::sync::atomic::Ordering::Relaxed) {
-            return;
+            return; // Handled in about_to_wait
         }
 
         let plugin_name = self
@@ -953,6 +953,20 @@ impl PersistentEditorApp {
                     let _ = tx.send(Err(e));
                 }
             }
+        }
+    }
+}
+
+impl Drop for PersistentEditorApp {
+    /// Ensure we always signal the caller. If the event loop exited before
+    /// try_open_editor ran (e.g. run_app failed), the caller would otherwise
+    /// see RecvTimeoutError::Disconnected ("Editor thread exited before
+    /// reporting open state").
+    fn drop(&mut self) {
+        if let Some(tx) = self.opened_tx.take() {
+            let _ = tx.send(Err(
+                "Event loop exited before editor could open".to_string(),
+            ));
         }
     }
 }
@@ -994,6 +1008,12 @@ impl ApplicationHandler for PersistentEditorApp {
                 self.cleanup_editor();
                 // Exit so the wrapper can join this thread before dropping the plugin.
                 // Without this, unload could set plugin=None while we still held IPlugView.
+                event_loop.exit();
+            } else if let Some(tx) = self.opened_tx.take() {
+                // Close requested before we opened; signal failure and exit so caller gets response
+                let _ = tx.send(Err(
+                    "Editor close requested before window could open".to_string(),
+                ));
                 event_loop.exit();
             }
         } else if self.state.is_none() {
@@ -1038,9 +1058,14 @@ pub fn open_editor_window_persistent(
         builder.with_x11().with_any_thread(true);
     }
 
-    let event_loop = builder
-        .build()
-        .map_err(|e| format!("Failed to create event loop: {}", e))?;
+    let event_loop = match builder.build() {
+        Ok(el) => el,
+        Err(e) => {
+            let msg = format!("Failed to create event loop: {}", e);
+            let _ = opened_tx.send(Err(msg.clone()));
+            return Err(msg);
+        }
+    };
 
     event_loop.set_control_flow(ControlFlow::Poll);
 
