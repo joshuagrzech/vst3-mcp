@@ -156,6 +156,18 @@ impl eframe::App for InstallerApp {
             ui.heading("AgentAudio Installer");
             ui.add_space(6.0);
 
+            #[cfg(not(target_os = "linux"))]
+            {
+                ui.colored_label(
+                    eframe::egui::Color32::from_rgb(200, 120, 0),
+                    format!(
+                        "This installer supports Linux only. On {} the install actions will report \"not supported\".",
+                        std::env::consts::OS
+                    ),
+                );
+                ui.add_space(6.0);
+            }
+
             ui.label("One-click build + install for the wrapper VST3 + MCP router tooling.");
             ui.add_space(10.0);
 

@@ -1279,10 +1279,11 @@ impl IBStreamTrait for VecStream {
         // Safety: IBStream is used single-threaded from the plugin side.
         let inner = unsafe { &mut *self.inner.get() };
 
-        let new_pos = match mode as u32 {
-            x if x == kIBSeekSet => pos as usize,
-            x if x == kIBSeekCur => (inner.position as i64 + pos) as usize,
-            x if x == kIBSeekEnd => (inner.data.len() as i64 + pos) as usize,
+        let mode_u32 = mode as u32;
+        let new_pos = match mode_u32 {
+            x if x == kIBSeekSet as u32 => pos as usize,
+            x if x == kIBSeekCur as u32 => (inner.position as i64 + pos) as usize,
+            x if x == kIBSeekEnd as u32 => (inner.data.len() as i64 + pos) as usize,
             _ => return vst3::Steinberg::kInvalidArgument,
         };
 
