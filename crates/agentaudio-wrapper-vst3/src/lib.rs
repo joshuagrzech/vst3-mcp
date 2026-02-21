@@ -536,8 +536,6 @@ struct GuiState {
     /// User-entered path to a .vst3 bundle (e.g. /usr/lib/vst3/MyPlugin.vst3 or ~/.vst3/Synth.vst3)
     plugin_path: String,
     message: String,
-    /// Path buffer for loading a .vst3 bundle (drag-drop is not supported by the plugin host UI backend).
-    path_to_load: String,
 }
 
 struct WrapperMcpServer {
