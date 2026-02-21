@@ -992,6 +992,9 @@ impl ApplicationHandler for PersistentEditorApp {
         if self.close_signal.load(std::sync::atomic::Ordering::Relaxed) {
             if self.state.is_some() {
                 self.cleanup_editor();
+                // Exit so the wrapper can join this thread before dropping the plugin.
+                // Without this, unload could set plugin=None while we still held IPlugView.
+                event_loop.exit();
             }
         } else if self.state.is_none() {
             self.try_open_editor(event_loop);

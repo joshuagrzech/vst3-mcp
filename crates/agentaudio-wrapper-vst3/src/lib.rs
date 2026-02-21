@@ -192,28 +192,31 @@ impl SharedState {
     }
 
     fn close_editor(&self) -> bool {
-        let (close_signal, is_open, has_thread, was_open) = match self.editor_runtime.lock() {
-            Ok(editor) => (
+        let (close_signal, join_handle, was_open) = match self.editor_runtime.lock() {
+            Ok(mut editor) => (
                 Arc::clone(&editor.close_signal),
-                Arc::clone(&editor.is_open),
-                editor.thread.is_some(),
+                editor.thread.take(),
                 editor.is_open.load(Ordering::Relaxed),
             ),
             Err(_) => return false,
         };
 
-        if !has_thread {
+        let Some(join_handle) = join_handle else {
             return false;
-        }
+        };
 
         close_signal.store(true, Ordering::Relaxed);
 
+        // Wait for the persistent loop to see close_signal, cleanup, and exit (up to 2s).
         for _ in 0..200 {
-            if !is_open.load(Ordering::Relaxed) {
+            if join_handle.is_finished() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+
+        // Join so the editor thread has fully dropped IPlugView before we may unload the plugin.
+        let _ = join_handle.join();
 
         was_open
     }
@@ -228,19 +231,18 @@ impl SharedState {
             .ok_or_else(|| "No child plugin loaded".to_string())?;
 
         // If the persistent editor thread is already running, re-open using the existing loop.
+        // If the thread has exited (e.g. after close_editor or a crash), clear it and spawn a new one.
         {
-            let editor = self
+            let mut editor = self
                 .editor_runtime
                 .lock()
                 .map_err(|e| format!("Lock error: {e}"))?;
             if let Some(handle) = editor.thread.as_ref() {
                 if handle.is_finished() {
-                    return Err(
-                        "Editor event loop stopped unexpectedly; reload the wrapper to recover"
-                            .to_string(),
-                    );
+                    editor.thread = None;
+                    drop(editor);
+                    return self.start_editor_thread(plugin_name);
                 }
-
                 if let Ok(mut name) = editor.plugin_name.write() {
                     *name = plugin_name.clone();
                 }
@@ -405,6 +407,9 @@ impl SharedState {
     }
 
     fn load_child_plugin(&self, uid: &str) -> Result<PluginInfo, String> {
+        // Ensure previous plugin and editor are fully torn down before loading.
+        // Otherwise the editor thread can hold a dangling IPlugView and crash.
+        self.unload_child_plugin()?;
         let info = self.find_plugin(uid)?;
         let class_id = hex_to_tuid(&info.uid)?;
         let module = Arc::new(
@@ -624,8 +629,8 @@ impl WrapperMcpServer {
     ) -> Result<String, String> {
         let expanded = expand_tilde(&req.path);
         let info = self.shared.load_child_plugin_by_path(&expanded)?;
-        let _ = self.shared.open_editor();
-
+        // Do not auto-open the child editor: many plugins (e.g. Vital) can crash if
+        // createView/attached run on a non-main thread or during load. Call open_child_editor explicitly if needed.
         let response = serde_json::json!({
             "status": "loaded",
             "uid": info.uid,
@@ -645,8 +650,8 @@ impl WrapperMcpServer {
         Parameters(req): Parameters<LoadChildRequest>,
     ) -> Result<String, String> {
         let info = self.shared.load_child_plugin(&req.uid)?;
-        let _ = self.shared.open_editor();
-
+        // Do not auto-open the child editor: many plugins (e.g. Vital) can crash if
+        // createView/attached run on a non-main thread or during load. Call open_child_editor explicitly if needed.
         let response = serde_json::json!({
             "status": "loaded",
             "uid": info.uid,
