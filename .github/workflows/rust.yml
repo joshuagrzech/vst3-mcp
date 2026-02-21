@@ -34,7 +34,7 @@ jobs:
     - uses: actions/checkout@v4
     
     - name: Build Release Binary
-      run: cargo build --release --verbose
+      run: ./scripts/master-release-installer.sh
       
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
