@@ -471,16 +471,6 @@ impl SharedState {
             .map_err(|_| ())
     }
 
-    fn mirror_param_immediate(&self, id: u32, value: f64) -> bool {
-        let mut guard = match self.child_plugin.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => return false,
-        };
-        let Some(plugin) = guard.as_mut() else {
-            return false;
-        };
-        plugin.set_parameter_immediate(id, value).is_ok()
-    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -896,13 +886,11 @@ impl WrapperMcpServer {
                 req.value
             ));
         }
-        let mirrored = self.shared.mirror_param_immediate(req.id, req.value);
         let accepted = self.shared.queue_param_change(req.id, req.value).is_ok();
         let response = serde_json::json!({
             "status": if accepted { "queued" } else { "dropped_queue_full" },
             "id": req.id,
             "value": req.value,
-            "immediate_applied": mirrored,
             "queue_len": self.shared.param_queue.len(),
             "timestamp_ms": now_ms(),
             "instance_id": self.shared.instance_id.as_str(),
@@ -927,11 +915,7 @@ impl WrapperMcpServer {
         }
 
         let mut accepted = 0usize;
-        let mut mirrored = 0usize;
         for change in &req.changes {
-            if self.shared.mirror_param_immediate(change.id, change.value) {
-                mirrored += 1;
-            }
             if self
                 .shared
                 .queue_param_change(change.id, change.value)
@@ -945,7 +929,6 @@ impl WrapperMcpServer {
             "status": "queued",
             "accepted": accepted,
             "dropped": req.changes.len().saturating_sub(accepted),
-            "immediate_applied": mirrored,
             "queue_len": self.shared.param_queue.len(),
             "timestamp_ms": now_ms(),
             "instance_id": self.shared.instance_id.as_str(),
@@ -1159,7 +1142,6 @@ impl WrapperMcpServer {
             .and_then(|v| v.as_u64())
             .ok_or_else(|| "Parameter missing id".to_string())? as u32;
 
-        let mirrored = self.shared.mirror_param_immediate(id, req.value);
         let accepted = self.shared.queue_param_change(id, req.value).is_ok();
 
         let response = serde_json::json!({
@@ -1167,7 +1149,6 @@ impl WrapperMcpServer {
             "id": id,
             "name": param.get("name").and_then(|v| v.as_str()).unwrap_or(""),
             "value": req.value,
-            "immediate_applied": mirrored,
             "queue_len": self.shared.param_queue.len(),
             "timestamp_ms": now_ms(),
             "instance_id": self.shared.instance_id.as_str(),
