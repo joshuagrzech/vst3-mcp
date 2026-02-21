@@ -2,7 +2,7 @@
   {
     "prompt": "Edit patch in Serum",
     "expected_block_web_search": true,
-    "expected_first_tool": "scan_plugins"
+    "expected_first_tool": "list_instances"
   },
   {
     "prompt": "Make FabFilter Pro-Q less harsh",
@@ -27,7 +27,7 @@
   {
     "prompt": "Load a VST plugin and tweak the tone",
     "expected_block_web_search": true,
-    "expected_first_tool": "scan_plugins"
+    "expected_first_tool": "list_instances"
   },
   {
     "prompt": "Patch this preset so it sounds brighter",
@@ -47,7 +47,7 @@
   {
     "prompt": "I want this plugin preset to be warmer",
     "expected_block_web_search": true,
-    "expected_first_tool": "scan_plugins"
+    "expected_first_tool": "list_instances"
   },
   {
     "prompt": "Tune the EQ parameters in this VST",
@@ -57,7 +57,7 @@
   {
     "prompt": "Open the plugin and edit the patch",
     "expected_block_web_search": true,
-    "expected_first_tool": "scan_plugins"
+    "expected_first_tool": "list_instances"
   },
   {
     "prompt": "Find docs for Serum wavetable import",
@@ -107,7 +107,7 @@
   {
     "prompt": "Make the snare bus plugin punchier",
     "expected_block_web_search": true,
-    "expected_first_tool": "scan_plugins"
+    "expected_first_tool": "list_instances"
   },
   {
     "prompt": "Find the parameter for stereo width",
@@ -132,7 +132,7 @@
   {
     "prompt": "I need a new sound in my synth plugin",
     "expected_block_web_search": true,
-    "expected_first_tool": "scan_plugins"
+    "expected_first_tool": "list_instances"
   },
   {
     "prompt": "Help me tweak parameter values for a less harsh tone",

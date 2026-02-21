@@ -609,64 +609,8 @@ impl WrapperMcpServer {
 
 #[tool_router]
 impl WrapperMcpServer {
-    #[tool(
-        description = "Scan installed VST plugins. Use first when user says plugin/VST/synth/preset/patch/sound/tone."
-    )]
-    fn scan_plugins(
-        &self,
-        Parameters(req): Parameters<ScanPluginsRequest>,
-    ) -> Result<String, String> {
-        let plugins = self.shared.scan_plugins(req.path.as_deref())?;
-        serde_json::to_string_pretty(&plugins).map_err(|e| format!("Serialization failed: {e}"))
-    }
-
-    #[tool(
-        description = "Load a child VST plugin by path to a .vst3 bundle. Useful when user requests a specific plugin file."
-    )]
-    fn load_child_plugin_by_path(
-        &self,
-        Parameters(req): Parameters<LoadChildByPathRequest>,
-    ) -> Result<String, String> {
-        let expanded = expand_tilde(&req.path);
-        let info = self.shared.load_child_plugin_by_path(&expanded)?;
-        // Do not auto-open the child editor: many plugins (e.g. Vital) can crash if
-        // createView/attached run on a non-main thread or during load. Call open_child_editor explicitly if needed.
-        let response = serde_json::json!({
-            "status": "loaded",
-            "uid": info.uid,
-            "name": info.name,
-            "vendor": info.vendor,
-            "mcp_name": self.shared.mcp_name(),
-            "instance_id": self.shared.instance_id.as_str(),
-        });
-        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
-    }
-
-    #[tool(
-        description = "Load a child VST plugin by UID (requires scan_plugins or load_child_plugin_by_path first)."
-    )]
-    fn load_child_plugin(
-        &self,
-        Parameters(req): Parameters<LoadChildRequest>,
-    ) -> Result<String, String> {
-        let info = self.shared.load_child_plugin(&req.uid)?;
-        // Do not auto-open the child editor: many plugins (e.g. Vital) can crash if
-        // createView/attached run on a non-main thread or during load. Call open_child_editor explicitly if needed.
-        let response = serde_json::json!({
-            "status": "loaded",
-            "uid": info.uid,
-            "name": info.name,
-            "vendor": info.vendor,
-            "mcp_name": self.shared.mcp_name(),
-            "instance_id": self.shared.instance_id.as_str(),
-        });
-        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
-    }
-
-    #[tool(description = "Alias for load_child_plugin. Natural-language 'load plugin' name.")]
-    fn load_plugin(&self, Parameters(req): Parameters<LoadChildRequest>) -> Result<String, String> {
-        self.load_child_plugin(Parameters(req))
-    }
+    // Scan and load are not exposed via MCP. Load plugins in the wrapper GUI; MCP only operates on running instances.
+    // First step for an instance is param introspection (list_params, list_param_groups, find_vst_parameter).
 
     #[tool(description = "Unload current child plugin.")]
     fn unload_child_plugin(&self) -> Result<String, String> {
@@ -937,7 +881,7 @@ impl WrapperMcpServer {
         })
     }
 
-    #[tool(description = "Load plugin state from a .vstpreset file. Call load_child_plugin first.")]
+    #[tool(description = "Load plugin state from a .vstpreset file. Requires a plugin already loaded in this instance.")]
     fn load_preset(
         &self,
         Parameters(req): Parameters<LoadPresetRequest>,
@@ -1056,7 +1000,7 @@ impl ServerHandler for WrapperMcpServer {
                     "{} realtime wrapper server (instance {}).\n\
 Hard routing rule: If user mentions VST/plugin/preset/patch/sound/tone/parameter/knob/automation, use Audio MCP tools first. Do not use web search unless user explicitly asks for docs/news.\n\
 Disambiguation: In audio context, patch = preset/sound configuration, not code diff.\n\
-Workflow: scan_plugins -> load_plugin -> find_vst_parameter -> preview_vst_parameter_values -> set_param_realtime/batch_set_realtime (or edit_vst_patch).",
+Workflow: Operate on running instances only (load plugin in wrapper GUI). First step: param introspection (list_params, list_param_groups, find_vst_parameter), then preview_vst_parameter_values, set_param_realtime/batch_set_realtime (or edit_vst_patch).",
                     self.shared.mcp_name(),
                     self.shared.instance_id
                 )

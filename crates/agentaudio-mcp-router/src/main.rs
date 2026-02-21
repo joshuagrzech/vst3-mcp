@@ -679,7 +679,7 @@ fn choose_audio_first_tool(user_message: &str) -> &'static str {
     if contains_any(&lower, &PARAMETER_TUNING_TERMS) {
         "find_vst_parameter"
     } else {
-        "scan_plugins"
+        "list_instances"
     }
 }
 
@@ -868,46 +868,8 @@ impl RouterMcpServer {
     }
 
     // ---- Proxy tools ----
-
-    #[tool(
-        description = "Scan installed VST plugins. Use first for requests mentioning plugin/VST/synth/preset/patch/sound/tone."
-    )]
-    async fn scan_plugins(
-        &self,
-        Parameters(req): Parameters<ProxyScanPluginsRequest>,
-    ) -> Result<String, String> {
-        let id = self.resolve_instance_id(req.instance_id).await?;
-        let args = serde_json::json!({ "path": req.path }).as_object().cloned();
-        self.call_wrapper_tool(&id, "scan_plugins", args).await
-    }
-
-    #[tool(
-        description = "Load a child VST plugin by UID after scan_plugins. Use for requests like 'load Serum' or 'open FabFilter plugin'."
-    )]
-    async fn load_child_plugin(
-        &self,
-        Parameters(req): Parameters<ProxyLoadChildRequest>,
-    ) -> Result<String, String> {
-        let id = self.resolve_instance_id(req.instance_id).await?;
-        let args = serde_json::json!({ "uid": req.uid }).as_object().cloned();
-        let raw = self
-            .call_wrapper_tool(&id, "load_child_plugin", args)
-            .await?;
-        inject_docs_hint(raw)
-    }
-
-    #[tool(description = "Alias for load_child_plugin. Natural-language name for 'load plugin'.")]
-    async fn load_plugin(
-        &self,
-        Parameters(req): Parameters<ProxyLoadChildRequest>,
-    ) -> Result<String, String> {
-        let id = self.resolve_instance_id(req.instance_id).await?;
-        let args = serde_json::json!({ "uid": req.uid }).as_object().cloned();
-        let raw = self
-            .call_wrapper_tool(&id, "load_child_plugin", args)
-            .await?;
-        inject_docs_hint(raw)
-    }
+    // Scan and load are not exposed. MCP only operates on running instances; user loads plugins in the wrapper GUI.
+    // First step is param introspection (list_params, list_param_groups, find_vst_parameter).
 
     #[tool(description = "Unload currently loaded child plugin.")]
     async fn unload_child_plugin(
@@ -1138,14 +1100,13 @@ impl RouterMcpServer {
             "recommended_route": if block_web_search { "audio_mcp" } else { "web_or_general" },
             "recommended_first_tool": recommended_first_tool,
             "recommended_workflow": [
-                "1. scan_plugins",
-                "2. load_plugin (by uid) — check docs_hint in response",
-                "3. search_plugin_docs (get plugin-specific quirks and parameter mappings — do this BEFORE editing)",
-                "4. search_sound_design_guide (get step-by-step recipe if user has a sound goal)",
-                "5. find_vst_parameter (search by name/intent)",
-                "6. get_param_info (probe range for a specific id before editing)",
-                "7. set_param_by_name (if you know the name) OR set_param_realtime/batch_set_realtime/edit_vst_patch (if you know the id)",
-                "8. save_preset (persist to .vstpreset file when done)"
+                "1. list_instances — see running wrapper instances (plugin already loaded in wrapper GUI)",
+                "2. Param introspection: list_params, list_param_groups, or find_vst_parameter",
+                "3. search_plugin_docs (plugin-specific quirks and parameter mappings — do BEFORE editing)",
+                "4. search_sound_design_guide (step-by-step recipe if user has a sound goal)",
+                "5. get_param_info (probe range for a specific id before editing)",
+                "6. set_param_by_name OR set_param_realtime/batch_set_realtime/edit_vst_patch",
+                "7. save_preset (persist to .vstpreset when done)"
             ],
         });
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
@@ -1185,7 +1146,7 @@ impl RouterMcpServer {
     }
 
     #[tool(
-        description = "Load plugin state from a .vstpreset file. Call load_child_plugin first to ensure the plugin is loaded."
+        description = "Load plugin state from a .vstpreset file. Requires a plugin already loaded in the instance."
     )]
     async fn load_preset(
         &self,
@@ -1271,14 +1232,14 @@ Hard routing rule: If user mentions VST/plugin/preset/patch/sound/tone/parameter
 Disambiguation: In audio context, patch = preset/sound configuration, not code diff.\n\
 Run guard_audio_routing before any web search call.\n\
 Recommended workflow:\n\
-  1. scan_plugins — discover available plugins\n\
-  2. load_plugin — load by UID (response includes docs_hint if local docs exist)\n\
-  3. search_plugin_docs — ALWAYS call this before editing: get plugin-specific quirks, routing rules, and parameter mappings\n\
-  4. search_sound_design_guide — call this when user describes a sound goal (e.g. 'neuro bass', 'reese bass') to get a step-by-step recipe\n\
-  5. find_vst_parameter — search parameters by natural language\n\
-  6. get_param_info — probe display range for a specific parameter id before editing\n\
-  7. set_param_by_name (if you know the name) OR set_param_realtime / batch_set_realtime / edit_vst_patch (if you know the id)\n\
-  8. save_preset — persist to .vstpreset file when satisfied with the sound"
+  Operate on running instances only (load plugins in the wrapper GUI).\n\
+  1. list_instances — see which wrapper instances are running and their loaded plugin\n\
+  2. Param introspection first: list_params, list_param_groups, or find_vst_parameter\n\
+  3. search_plugin_docs — before editing: plugin-specific quirks and parameter mappings\n\
+  4. search_sound_design_guide — when user has a sound goal (e.g. neuro bass, reese bass)\n\
+  5. get_param_info — probe display range for a parameter id before editing\n\
+  6. set_param_by_name OR set_param_realtime / batch_set_realtime / edit_vst_patch\n\
+  7. save_preset — persist to .vstpreset when done"
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
