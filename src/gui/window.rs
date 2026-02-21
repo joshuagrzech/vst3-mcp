@@ -12,11 +12,9 @@ use std::time::Duration;
 
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 use tracing::{debug, error, info, warn};
-use vst3::com_scrape_types::{ComPtr, ComWrapper};
-use vst3::Steinberg::{
-    kResultOk, IPlugFrame, IPlugView, IPlugViewTrait, ViewRect,
-};
 use vst3::Steinberg::Vst::IEditControllerTrait;
+use vst3::Steinberg::{IPlugFrame, IPlugView, IPlugViewTrait, ViewRect, kResultOk};
+use vst3::com_scrape_types::{ComPtr, ComWrapper};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
@@ -102,14 +100,11 @@ impl EditorApp {
 }
 
 impl EditorApp {
-    /// Properly tear down the editor: call IPlugView::removed(), clear frame, then drop state.
+    /// Properly tear down the editor by dropping `EditorState`.
     fn cleanup_editor(&mut self) {
-        if let Some(state) = self.state.take() {
-            unsafe {
-                state.plug_view.removed();
-                state.plug_view.setFrame(std::ptr::null_mut());
-            }
-            // state is now dropped (window, plug_frame, etc.)
+        if self.state.take().is_some() {
+            // EditorState::drop() performs IPlugView teardown. Calling removed()/setFrame()
+            // here as well can double-dispose plugin views and crash some plugins on unload.
         }
     }
 }
@@ -253,14 +248,12 @@ fn create_editor_state(
         if view_ptr.is_null() {
             return Err("createView returned null -- plugin may not have an editor".to_string());
         }
-        ComPtr::from_raw(view_ptr)
-            .ok_or_else(|| "Invalid IPlugView pointer".to_string())?
+        ComPtr::from_raw(view_ptr).ok_or_else(|| "Invalid IPlugView pointer".to_string())?
     };
 
     // Check platform support
-    let supported = unsafe {
-        plug_view.isPlatformTypeSupported(PLATFORM_TYPE_X11.as_ptr() as *const i8)
-    };
+    let supported =
+        unsafe { plug_view.isPlatformTypeSupported(PLATFORM_TYPE_X11.as_ptr() as *const i8) };
     if supported != kResultOk {
         return Err(format!(
             "Plugin doesn't support X11EmbedWindowID (returned {})",
@@ -278,7 +271,10 @@ fn create_editor_state(
     unsafe {
         let result = plug_view.getSize(&mut view_rect);
         if result != kResultOk {
-            warn!("IPlugView::getSize failed (code {}), using default 800x600", result);
+            warn!(
+                "IPlugView::getSize failed (code {}), using default 800x600",
+                result
+            );
             view_rect.right = 800;
             view_rect.bottom = 600;
         }
@@ -396,12 +392,8 @@ fn get_x11_window_id(window: &Window) -> Result<u32, String> {
         .map_err(|e| format!("Failed to get window handle: {}", e))?;
 
     match handle.as_raw() {
-        raw_window_handle::RawWindowHandle::Xlib(xlib) => {
-            Ok(xlib.window as u32)
-        }
-        raw_window_handle::RawWindowHandle::Xcb(xcb) => {
-            Ok(xcb.window.get())
-        }
+        raw_window_handle::RawWindowHandle::Xlib(xlib) => Ok(xlib.window as u32),
+        raw_window_handle::RawWindowHandle::Xcb(xcb) => Ok(xcb.window.get()),
         other => Err(format!("Not running on X11 (got {:?})", other)),
     }
 }
@@ -505,10 +497,10 @@ fn poll_x11_events(state: &mut EditorState) {
                         if state.plugin_window_id.is_some_and(|w| w == cfg.window)
                             && (cfg.x != 0 || cfg.y != 0)
                         {
-                            if let Ok(cookie) = state.x11_conn.configure_window(
-                                cfg.window,
-                                &ConfigureWindowAux::new().x(0).y(0),
-                            ) {
+                            if let Ok(cookie) = state
+                                .x11_conn
+                                .configure_window(cfg.window, &ConfigureWindowAux::new().x(0).y(0))
+                            {
                                 let _ = cookie.check();
                             }
                             let _ = state.x11_conn.flush();
@@ -544,11 +536,11 @@ fn poll_and_dispatch_fds(state: &mut EditorState) {
         // Use modify-or-add pattern: try to modify first, add if it fails
         unsafe {
             let event = PollEvent::new(idx, true, false);
-            if state.poller.modify_with_mode(
-                BorrowedFd::borrow_raw(fd),
-                event,
-                PollMode::Level,
-            ).is_err() {
+            if state
+                .poller
+                .modify_with_mode(BorrowedFd::borrow_raw(fd), event, PollMode::Level)
+                .is_err()
+            {
                 let _ = state.poller.add_with_mode(fd, event, PollMode::Level);
             }
         }
@@ -556,7 +548,10 @@ fn poll_and_dispatch_fds(state: &mut EditorState) {
 
     // Poll with zero timeout (non-blocking)
     state.poll_events.clear();
-    match state.poller.wait(&mut state.poll_events, Some(Duration::ZERO)) {
+    match state
+        .poller
+        .wait(&mut state.poll_events, Some(Duration::ZERO))
+    {
         Ok(_) => {
             let ready_fds: Vec<RawFd> = state
                 .poll_events

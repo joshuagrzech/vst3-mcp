@@ -11,33 +11,138 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
-use vst3::com_scrape_types::{ComPtr, ComWrapper};
 use vst3::Steinberg::Vst::{
-    AudioBusBuffers, BusDirections_::*, BusInfo as VstBusInfo, IComponent, IComponentTrait,
-    IComponentHandler, IAudioProcessor, IAudioProcessorTrait, IConnectionPoint,
-    IConnectionPointTrait, IEditController, IEditControllerTrait,
-    MediaTypes_::*, ParameterInfo, ProcessContext, ProcessData, ProcessSetup,
-    ProcessModes_::kOffline, SymbolicSampleSizes_::kSample32,
-    ParamID, ParamValue,
+    AudioBusBuffers, BusDirections_::*, BusInfo as VstBusInfo, Event, Event_, Event__type0,
+    IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler, IComponentTrait,
+    IConnectionPoint, IConnectionPointTrait, IEditController, IEditControllerTrait, IEventList,
+    MediaTypes_::*, NoteOffEvent, NoteOnEvent, ParamID, ParamValue, ParameterInfo,
+    PolyPressureEvent, ProcessContext, ProcessData, ProcessModes_::kOffline, ProcessSetup,
+    SymbolicSampleSizes_::kSample32,
 };
 use vst3::Steinberg::{
-    kResultOk, FUnknown, IBStream, IBStreamTrait, IPluginBaseTrait,
-    IPluginFactoryTrait, TUID, int32,
-    IBStream_::IStreamSeekMode_::*,
+    FUnknown, IBStream, IBStream_::IStreamSeekMode_::*, IBStreamTrait, IPluginBaseTrait,
+    IPluginFactoryTrait, TUID, int32, kResultOk,
 };
+use vst3::com_scrape_types::{ComPtr, ComWrapper};
 
+use super::event_list::EventList;
 use super::host_app::{ComponentHandler, HostApp};
 use super::module::VstModule;
-use super::param_changes::{ParameterChanges, ParamValueQueue};
-use super::types::{
-    BusDirection, BusInfo, BusType, HostError, ParamInfo, PluginState,
-};
+use super::param_changes::{ParamValueQueue, ParameterChanges};
+use super::types::{BusDirection, BusInfo, BusType, HostError, ParamInfo, PluginState};
 
 /// A queued parameter change to be delivered via ProcessData.
 #[allow(dead_code)]
 struct ParameterChange {
     id: ParamID,
     value: ParamValue,
+}
+
+/// A queued note/event destined for ProcessData::inputEvents.
+#[derive(Debug, Clone, Copy)]
+pub enum InputEvent {
+    NoteOn {
+        timing: i32,
+        channel: i16,
+        note: i16,
+        velocity: f32,
+        note_id: i32,
+    },
+    NoteOff {
+        timing: i32,
+        channel: i16,
+        note: i16,
+        velocity: f32,
+        note_id: i32,
+    },
+    PolyPressure {
+        timing: i32,
+        channel: i16,
+        note: i16,
+        pressure: f32,
+        note_id: i32,
+    },
+}
+
+impl InputEvent {
+    fn clamped_timing(timing: i32, num_samples: i32) -> i32 {
+        if num_samples <= 0 {
+            0
+        } else {
+            timing.clamp(0, num_samples.saturating_sub(1))
+        }
+    }
+
+    fn to_vst_event(self, num_samples: i32) -> Event {
+        match self {
+            InputEvent::NoteOn {
+                timing,
+                channel,
+                note,
+                velocity,
+                note_id,
+            } => Event {
+                busIndex: 0,
+                sampleOffset: Self::clamped_timing(timing, num_samples),
+                ppqPosition: 0.0,
+                flags: Event_::EventFlags_::kIsLive as u16,
+                r#type: Event_::EventTypes_::kNoteOnEvent as u16,
+                __field0: Event__type0 {
+                    noteOn: NoteOnEvent {
+                        channel: channel.clamp(0, 15),
+                        pitch: note.clamp(0, 127),
+                        tuning: 0.0,
+                        velocity: velocity.clamp(0.0, 1.0),
+                        length: 0,
+                        noteId: note_id,
+                    },
+                },
+            },
+            InputEvent::NoteOff {
+                timing,
+                channel,
+                note,
+                velocity,
+                note_id,
+            } => Event {
+                busIndex: 0,
+                sampleOffset: Self::clamped_timing(timing, num_samples),
+                ppqPosition: 0.0,
+                flags: Event_::EventFlags_::kIsLive as u16,
+                r#type: Event_::EventTypes_::kNoteOffEvent as u16,
+                __field0: Event__type0 {
+                    noteOff: NoteOffEvent {
+                        channel: channel.clamp(0, 15),
+                        pitch: note.clamp(0, 127),
+                        velocity: velocity.clamp(0.0, 1.0),
+                        noteId: note_id,
+                        tuning: 0.0,
+                    },
+                },
+            },
+            InputEvent::PolyPressure {
+                timing,
+                channel,
+                note,
+                pressure,
+                note_id,
+            } => Event {
+                busIndex: 0,
+                sampleOffset: Self::clamped_timing(timing, num_samples),
+                ppqPosition: 0.0,
+                flags: Event_::EventFlags_::kIsLive as u16,
+                r#type: Event_::EventTypes_::kPolyPressureEvent as u16,
+                __field0: Event__type0 {
+                    polyPressure: PolyPressureEvent {
+                        channel: channel.clamp(0, 15),
+                        pitch: note.clamp(0, 127),
+                        pressure: pressure.clamp(0.0, 1.0),
+                        noteId: note_id,
+                    },
+                },
+            },
+        }
+    }
 }
 
 /// A loaded and initialized VST3 plugin instance.
@@ -63,11 +168,15 @@ pub struct PluginInstance {
 
     // Parameter change queue
     param_changes: VecDeque<ParameterChange>,
+    // Input note/events queue
+    input_events: VecDeque<InputEvent>,
 
     // Parameter change COM infrastructure
     param_changes_impl: ComWrapper<ParameterChanges>,
     param_queues: Vec<ComWrapper<ParamValueQueue>>,
     max_params_per_block: usize,
+    // Input event list COM infrastructure
+    input_events_impl: ComWrapper<EventList>,
 
     // Audio bus layout (populated during setup())
     num_input_buses: i32,
@@ -132,17 +241,14 @@ impl PluginInstance {
                     "factory.createInstance failed for IComponent".to_string(),
                 ));
             }
-            ComPtr::from_raw(obj as *mut IComponent).ok_or_else(|| {
-                HostError::InitializeFailed("null IComponent pointer".to_string())
-            })?
+            ComPtr::from_raw(obj as *mut IComponent)
+                .ok_or_else(|| HostError::InitializeFailed("null IComponent pointer".to_string()))?
         };
 
         // 2. Initialize component with host context
-        let host_ptr = host_app
-            .to_com_ptr::<FUnknown>()
-            .ok_or_else(|| {
-                HostError::InitializeFailed("failed to get FUnknown from HostApp".to_string())
-            })?;
+        let host_ptr = host_app.to_com_ptr::<FUnknown>().ok_or_else(|| {
+            HostError::InitializeFailed("failed to get FUnknown from HostApp".to_string())
+        })?;
 
         unsafe {
             let result = component.initialize(host_ptr.as_ptr());
@@ -156,9 +262,7 @@ impl PluginInstance {
 
         // 3. Query IAudioProcessor from component
         let processor: ComPtr<IAudioProcessor> = component.cast().ok_or_else(|| {
-            HostError::InitializeFailed(
-                "component does not implement IAudioProcessor".to_string(),
-            )
+            HostError::InitializeFailed("component does not implement IAudioProcessor".to_string())
         })?;
 
         // 4. Get or create the edit controller
@@ -249,9 +353,11 @@ impl PluginInstance {
             _comp_connection: comp_connection,
             _ctrl_connection: ctrl_connection,
             param_changes: VecDeque::new(),
+            input_events: VecDeque::new(),
             param_changes_impl: ParameterChanges::new(&vec![]),
             param_queues: Vec::new(),
             max_params_per_block: 0,
+            input_events_impl: EventList::new(256),
             num_input_buses: 0,
             num_output_buses: 0,
             aux_input_channel_counts: Vec::new(),
@@ -322,20 +428,22 @@ impl PluginInstance {
         self.param_changes_impl = ParameterChanges::new(&self.param_queues);
 
         // Query actual bus counts from the plugin
-        self.num_input_buses = unsafe {
-            self.component.getBusCount(kAudio as i32, kInput as i32)
-        };
-        self.num_output_buses = unsafe {
-            self.component.getBusCount(kAudio as i32, kOutput as i32)
-        };
+        self.num_input_buses = unsafe { self.component.getBusCount(kAudio as i32, kInput as i32) };
+        self.num_output_buses =
+            unsafe { self.component.getBusCount(kAudio as i32, kOutput as i32) };
 
         // Query main bus channel count for pre-allocating pointer arrays
         let main_input_channels = if self.num_input_buses > 0 {
             let mut info: VstBusInfo = unsafe { std::mem::zeroed() };
             let result = unsafe {
-                self.component.getBusInfo(kAudio as i32, kInput as i32, 0, &mut info)
+                self.component
+                    .getBusInfo(kAudio as i32, kInput as i32, 0, &mut info)
             };
-            if result == kResultOk { info.channelCount } else { 0 }
+            if result == kResultOk {
+                info.channelCount
+            } else {
+                0
+            }
         } else {
             0
         };
@@ -343,9 +451,14 @@ impl PluginInstance {
         let main_output_channels = if self.num_output_buses > 0 {
             let mut info: VstBusInfo = unsafe { std::mem::zeroed() };
             let result = unsafe {
-                self.component.getBusInfo(kAudio as i32, kOutput as i32, 0, &mut info)
+                self.component
+                    .getBusInfo(kAudio as i32, kOutput as i32, 0, &mut info)
             };
-            if result == kResultOk { info.channelCount } else { 0 }
+            if result == kResultOk {
+                info.channelCount
+            } else {
+                0
+            }
         } else {
             0
         };
@@ -366,14 +479,21 @@ impl PluginInstance {
         for i in 1..self.num_input_buses {
             let mut info: VstBusInfo = unsafe { std::mem::zeroed() };
             let ch_count = unsafe {
-                let result = self.component.getBusInfo(kAudio as i32, kInput as i32, i, &mut info);
-                if result == kResultOk { info.channelCount } else { 0 }
+                let result = self
+                    .component
+                    .getBusInfo(kAudio as i32, kInput as i32, i, &mut info);
+                if result == kResultOk {
+                    info.channelCount
+                } else {
+                    0
+                }
             };
             self.aux_input_channel_counts.push(ch_count);
 
             // Allocate silence buffer for each channel of this aux bus
             for _ in 0..ch_count {
-                self.aux_silence_bufs.push(vec![0.0f32; max_block_size as usize]);
+                self.aux_silence_bufs
+                    .push(vec![0.0f32; max_block_size as usize]);
             }
         }
 
@@ -381,14 +501,21 @@ impl PluginInstance {
         for i in 1..self.num_output_buses {
             let mut info: VstBusInfo = unsafe { std::mem::zeroed() };
             let ch_count = unsafe {
-                let result = self.component.getBusInfo(kAudio as i32, kOutput as i32, i, &mut info);
-                if result == kResultOk { info.channelCount } else { 0 }
+                let result = self
+                    .component
+                    .getBusInfo(kAudio as i32, kOutput as i32, i, &mut info);
+                if result == kResultOk {
+                    info.channelCount
+                } else {
+                    0
+                }
             };
             self.aux_output_channel_counts.push(ch_count);
 
             // Allocate scratch buffer for each channel of this aux bus
             for _ in 0..ch_count {
-                self.aux_silence_bufs.push(vec![0.0f32; max_block_size as usize]);
+                self.aux_silence_bufs
+                    .push(vec![0.0f32; max_block_size as usize]);
             }
         }
 
@@ -434,12 +561,14 @@ impl PluginInstance {
 
         debug!(
             "bus layout: {} input buses (main: {} ch), {} output buses (main: {} ch)",
-            self.num_input_buses, main_input_channels,
-            self.num_output_buses, main_output_channels
+            self.num_input_buses, main_input_channels, self.num_output_buses, main_output_channels
         );
 
         self.state = PluginState::SetupDone;
-        debug!("plugin setup complete ({}Hz, {} block size)", sample_rate, max_block_size);
+        debug!(
+            "plugin setup complete ({}Hz, {} block size)",
+            sample_rate, max_block_size
+        );
         Ok(())
     }
 
@@ -597,7 +726,8 @@ impl PluginInstance {
             };
 
             // Assemble all input buses: main bus + auxiliary buses
-            let mut all_input_buses: Vec<AudioBusBuffers> = Vec::with_capacity(self.num_input_buses as usize);
+            let mut all_input_buses: Vec<AudioBusBuffers> =
+                Vec::with_capacity(self.num_input_buses as usize);
             if self.num_input_buses > 0 {
                 all_input_buses.push(input_bus);
             }
@@ -606,7 +736,8 @@ impl PluginInstance {
             }
 
             // Assemble all output buses: main bus + auxiliary buses
-            let mut all_output_buses: Vec<AudioBusBuffers> = Vec::with_capacity(self.num_output_buses as usize);
+            let mut all_output_buses: Vec<AudioBusBuffers> =
+                Vec::with_capacity(self.num_output_buses as usize);
             if self.num_output_buses > 0 {
                 all_output_buses.push(output_bus);
             }
@@ -653,8 +784,20 @@ impl PluginInstance {
             }
 
             // Set inputParameterChanges in ProcessData
-            process_data.inputParameterChanges = self.param_changes_impl
+            process_data.inputParameterChanges = self
+                .param_changes_impl
                 .to_com_ptr::<vst3::Steinberg::Vst::IParameterChanges>()
+                .map(|p| p.as_ptr())
+                .unwrap_or(std::ptr::null_mut());
+
+            // Populate and set inputEvents in ProcessData
+            self.input_events_impl.clear();
+            while let Some(event) = self.input_events.pop_front() {
+                self.input_events_impl.push(event.to_vst_event(num_samples));
+            }
+            process_data.inputEvents = self
+                .input_events_impl
+                .to_com_ptr::<IEventList>()
                 .map(|p| p.as_ptr())
                 .unwrap_or(std::ptr::null_mut());
 
@@ -678,15 +821,21 @@ impl PluginInstance {
         self.param_changes.push_back(ParameterChange { id, value });
     }
 
+    /// Queue an input note/event for delivery in the next process() call.
+    pub fn queue_input_event(&mut self, event: InputEvent) {
+        self.input_events.push_back(event);
+    }
+
     /// Apply a parameter value immediately on the controller thread.
     ///
     /// This mirrors values in plugin UI/state outside the audio callback
     /// (e.g. when transport is idle). DSP automation still relies on
     /// `queue_parameter_change()` + `process()` delivery via IParameterChanges.
     pub fn set_parameter_immediate(&mut self, id: u32, value: f64) -> Result<(), HostError> {
-        let ctrl = self.controller.as_ref().ok_or_else(|| {
-            HostError::InvalidState("no edit controller available".to_string())
-        })?;
+        let ctrl = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| HostError::InvalidState("no edit controller available".to_string()))?;
 
         let result = unsafe { ctrl.setParamNormalized(id, value) };
         if result != kResultOk {
@@ -709,9 +858,10 @@ impl PluginInstance {
 
     /// Get info about a parameter by index.
     pub fn get_parameter_info(&self, index: i32) -> Result<ParamInfo, HostError> {
-        let ctrl = self.controller.as_ref().ok_or_else(|| {
-            HostError::InvalidState("no edit controller available".to_string())
-        })?;
+        let ctrl = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| HostError::InvalidState("no edit controller available".to_string()))?;
 
         unsafe {
             let mut info: ParameterInfo = std::mem::zeroed();
@@ -744,16 +894,17 @@ impl PluginInstance {
 
     /// Get the human-readable display string for a parameter value.
     pub fn get_parameter_display(&self, id: u32) -> Result<String, HostError> {
-        let ctrl = self.controller.as_ref()
+        let ctrl = self
+            .controller
+            .as_ref()
             .ok_or_else(|| HostError::InvalidState("no edit controller".to_string()))?;
 
         let normalized_value = unsafe { ctrl.getParamNormalized(id) };
 
         // Get human-readable string from plugin
         let mut string128: [u16; 128] = [0; 128];
-        let result = unsafe {
-            ctrl.getParamStringByValue(id, normalized_value, &mut string128 as *mut _)
-        };
+        let result =
+            unsafe { ctrl.getParamStringByValue(id, normalized_value, &mut string128 as *mut _) };
 
         if result == kResultOk {
             Ok(string128_to_string(&string128))
@@ -801,14 +952,19 @@ impl PluginInstance {
         let mut buses = Vec::new();
 
         for (media_type, bus_type) in [(kAudio, BusType::Audio), (kEvent, BusType::Event)] {
-            for (direction, bus_dir) in [(kInput, BusDirection::Input), (kOutput, BusDirection::Output)] {
+            for (direction, bus_dir) in [
+                (kInput, BusDirection::Input),
+                (kOutput, BusDirection::Output),
+            ] {
                 let count = unsafe {
-                    self.component.getBusCount(media_type as i32, direction as i32)
+                    self.component
+                        .getBusCount(media_type as i32, direction as i32)
                 };
                 for i in 0..count {
                     let mut info: VstBusInfo = unsafe { std::mem::zeroed() };
                     let result = unsafe {
-                        self.component.getBusInfo(media_type as i32, direction as i32, i, &mut info)
+                        self.component
+                            .getBusInfo(media_type as i32, direction as i32, i, &mut info)
                     };
                     if result == kResultOk {
                         buses.push(BusInfo {
@@ -862,8 +1018,10 @@ impl PluginInstance {
                 let count = unsafe { self.component.getBusCount(media_type, direction) };
                 for i in 0..count {
                     let mut info: VstBusInfo = unsafe { std::mem::zeroed() };
-                    let result =
-                        unsafe { self.component.getBusInfo(media_type, direction, i, &mut info) };
+                    let result = unsafe {
+                        self.component
+                            .getBusInfo(media_type, direction, i, &mut info)
+                    };
                     if result == kResultOk && (info.flags & 1 != 0) {
                         // kDefaultActive = 1
                         unsafe {
@@ -905,10 +1063,8 @@ impl Drop for PluginInstance {
         // Disconnect and drop connection point COM pointers BEFORE terminate.
         // take() moves the value out of the Option, so ccp and kcp are dropped
         // at the end of this `if let` block, releasing their COM references.
-        if let (Some(ccp), Some(kcp)) = (
-            self._comp_connection.take(),
-            self._ctrl_connection.take(),
-        ) {
+        if let (Some(ccp), Some(kcp)) = (self._comp_connection.take(), self._ctrl_connection.take())
+        {
             unsafe {
                 let _ = ccp.disconnect(kcp.as_ptr());
                 let _ = kcp.disconnect(ccp.as_ptr());
@@ -921,9 +1077,9 @@ impl Drop for PluginInstance {
         // block, releasing its COM reference BEFORE component.terminate().
         if let Some(ctrl) = self.controller.take() {
             let comp_as_ctrl: Option<ComPtr<IEditController>> = self.component.cast();
-            let is_same = comp_as_ctrl.as_ref().is_some_and(|c| {
-                std::ptr::eq(c.as_ptr(), ctrl.as_ptr())
-            });
+            let is_same = comp_as_ctrl
+                .as_ref()
+                .is_some_and(|c| std::ptr::eq(c.as_ptr(), ctrl.as_ptr()));
 
             if !is_same {
                 unsafe {

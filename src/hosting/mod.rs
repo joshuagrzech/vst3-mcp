@@ -4,6 +4,7 @@
 //! and managing VST3 plugins. No unsafe blocks should exist outside
 //! this module.
 
+pub mod event_list;
 pub mod host_app;
 pub mod module;
 pub mod param_changes;
