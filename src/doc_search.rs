@@ -1,12 +1,51 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 const PLUGIN_DOCS_ENV: &str = "AGENTAUDIO_PLUGIN_DOCS_DIR";
 const SOUND_GUIDE_ENV: &str = "AGENTAUDIO_SOUND_DESIGN_DIR";
 const DEFAULT_PLUGIN_DOCS_DIR: &str = "docs/plugins";
 const DEFAULT_SOUND_GUIDE_DIR: &str = "docs/sound-design";
 const MAX_EXCERPTS: usize = 3;
+
+#[derive(Clone, Default)]
+struct DocIndex {
+    plugin_files: Vec<PathBuf>,
+    plugin_files_dir: PathBuf,
+    sound_files: Vec<PathBuf>,
+    _sound_files_dir: PathBuf,
+}
+
+static DOC_INDEX: std::sync::OnceLock<RwLock<Option<DocIndex>>> = std::sync::OnceLock::new();
+
+fn get_doc_index() -> &'static RwLock<Option<DocIndex>> {
+    DOC_INDEX.get_or_init(|| RwLock::new(None))
+}
+
+fn ensure_doc_index() -> Result<(), String> {
+    let force_refresh = std::env::var("AGENTAUDIO_DOCS_REFRESH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let mut guard = get_doc_index().write().map_err(|e| format!("Lock error: {e}"))?;
+    if force_refresh {
+        *guard = None;
+    }
+    if guard.is_none() {
+        let plugin_dir = docs_dir_from_env(PLUGIN_DOCS_ENV, DEFAULT_PLUGIN_DOCS_DIR);
+        let sound_dir = docs_dir_from_env(SOUND_GUIDE_ENV, DEFAULT_SOUND_GUIDE_DIR);
+        let plugin_files = collect_doc_files(&plugin_dir).unwrap_or_else(|_| Vec::new());
+        let sound_files = collect_doc_files(&sound_dir).unwrap_or_else(|_| Vec::new());
+        *guard = Some(DocIndex {
+            plugin_files,
+            plugin_files_dir: plugin_dir,
+            sound_files,
+            _sound_files_dir: sound_dir,
+        });
+    }
+    Ok(())
+}
 const MAX_EXCERPT_CHARS: usize = 550;
 
 const STOPWORDS: [&str; 31] = [
@@ -33,14 +72,18 @@ pub fn search_plugin_docs(plugin_name: &str, query: &str) -> Result<serde_json::
         return Err("query is required.".to_string());
     }
 
-    let docs_dir = docs_dir_from_env(PLUGIN_DOCS_ENV, DEFAULT_PLUGIN_DOCS_DIR);
-    let files = collect_doc_files(&docs_dir)?;
-    let candidate_files = select_plugin_doc_files(&files, plugin_name);
+    ensure_doc_index()?;
+    let index = get_doc_index()
+        .read()
+        .map_err(|e| format!("Lock error: {e}"))?
+        .clone()
+        .ok_or_else(|| "Doc index not initialized.".to_string())?;
+    let candidate_files = select_plugin_doc_files(&index.plugin_files, plugin_name);
 
     if candidate_files.is_empty() {
         return Err(format!(
             "No plugin docs matched '{plugin_name}' in '{}'. Add a file such as '{}.md' (or set {}) and try again. You can also use search_params/find_vst_parameter for direct parameter exploration.",
-            docs_dir.display(),
+            index.plugin_files_dir.display(),
             plugin_name,
             PLUGIN_DOCS_ENV
         ));
@@ -76,8 +119,13 @@ pub fn search_sound_design_guide(
     }
 
     let query = query.map(str::trim).filter(|q| !q.is_empty());
-    let docs_dir = docs_dir_from_env(SOUND_GUIDE_ENV, DEFAULT_SOUND_GUIDE_DIR);
-    let files = collect_doc_files(&docs_dir)?;
+    ensure_doc_index()?;
+    let index = get_doc_index()
+        .read()
+        .map_err(|e| format!("Lock error: {e}"))?
+        .clone()
+        .ok_or_else(|| "Doc index not initialized.".to_string())?;
+    let files = &index.sound_files;
 
     let search_query = if let Some(q) = query {
         format!("{topic} {q}")
@@ -131,6 +179,17 @@ fn docs_dir_from_env(env_name: &str, default_relative: &str) -> PathBuf {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
+        }
+    }
+    if let Ok(base) = std::env::var("AGENTAUDIO_DOCS") {
+        let trimmed = base.trim().trim_end_matches('/');
+        if !trimmed.is_empty() {
+            let subdir = match default_relative {
+                "docs/plugins" => "plugins",
+                "docs/sound-design" => "sound-design",
+                _ => default_relative.trim_start_matches("docs/"),
+            };
+            return PathBuf::from(trimmed).join(subdir);
         }
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).join(default_relative)
