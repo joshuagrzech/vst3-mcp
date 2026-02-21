@@ -45,6 +45,8 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y libx11-dev libx11-xcb-dev
     - name: Install X11 development libraries
       run: sudo apt-get update && sudo apt-get install -y libx11-dev libxcursor-dev
+    - name: Install xcb libraries
+      run: sudo apt-get update && sudo apt-get install -y libxcb-icccm4-dev libxcb-dri2-0-dev
     - name: Build Release Bundle
       run: ./scripts/master-release-installer.sh "${{ github.workspace }}/dist"
 
