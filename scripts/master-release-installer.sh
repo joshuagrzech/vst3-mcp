@@ -28,14 +28,27 @@ PACKAGE_NAME="agentaudio-master-installer-${OS}-${ARCH}-${GIT_SHA}-${STAMP}"
 PACKAGE_DIR="$OUT_DIR/$PACKAGE_NAME"
 PRECOMPILED_RELEASE_DIR="$PACKAGE_DIR/precompiled-target/release"
 
+CARGO_CMD=(cargo)
+if command -v rustup >/dev/null 2>&1 && cargo +stable --version >/dev/null 2>&1; then
+  CARGO_CMD=(cargo +stable)
+fi
+
+if ! "${CARGO_CMD[@]}" metadata --format-version 1 --no-deps >/dev/null 2>&1; then
+  echo "Cargo toolchain cannot parse this workspace."
+  echo "Install a modern toolchain (Edition 2024 capable), then retry."
+  echo "If rustup is installed, run: rustup toolchain install stable"
+  exit 1
+fi
+
+echo "==> Using cargo command: ${CARGO_CMD[*]}"
 echo "==> Building release artifacts..."
-cargo build --release --manifest-path crates/agentaudio-wrapper-vst3/Cargo.toml
-cargo build --release \
+"${CARGO_CMD[@]}" build --release --manifest-path crates/agentaudio-wrapper-vst3/Cargo.toml
+"${CARGO_CMD[@]}" build --release \
   --bin agent-audio-scanner \
   --bin agentaudio-mcp-stdio \
   --bin agentaudio-mcp \
   --bin agentaudio-installer
-cargo build --release -p agentaudio-mcp-router --bin agentaudio-mcp-routerd
+"${CARGO_CMD[@]}" build --release -p agentaudio-mcp-router --bin agentaudio-mcp-routerd
 
 echo "==> Staging installer package..."
 rm -rf "$PACKAGE_DIR"
