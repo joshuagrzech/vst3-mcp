@@ -31,6 +31,7 @@ struct InstallerApp {
     install_binaries: bool,
     use_precompiled: bool,
     precompiled_path: String,
+    packaged_precompiled_detected: bool,
     use_build_cache: bool,
     enable_router_service: bool,
     configure_agents: bool,
@@ -54,13 +55,21 @@ impl InstallerApp {
             .ok()
             .unwrap_or_else(|| "http://127.0.0.1:38765".to_string());
 
+        let detected_precompiled = detect_packaged_precompiled_target();
+        let use_precompiled = detected_precompiled.is_some();
+        let precompiled_path = detected_precompiled
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "./target".to_string());
+
         Self {
             install_dir: default_vst3,
             router_base,
             install_plugin: true,
             install_binaries: true,
-            use_precompiled: false,
-            precompiled_path: "./target".to_string(),
+            use_precompiled,
+            precompiled_path,
+            packaged_precompiled_detected: detected_precompiled.is_some(),
             use_build_cache: true,
             enable_router_service: true,
             configure_agents: true,
@@ -174,6 +183,11 @@ impl eframe::App for InstallerApp {
                         ui.text_edit_singleline(&mut self.precompiled_path);
                     });
                     ui.small("Should point to the 'target' directory containing 'release/'.");
+                    if self.packaged_precompiled_detected {
+                        ui.small(
+                            "Detected packaged precompiled artifacts. Build is skipped by default.",
+                        );
+                    }
                 }
                 ui.checkbox(
                     &mut self.enable_router_service,
@@ -584,6 +598,45 @@ fn expand_tilde(s: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
+fn detect_packaged_precompiled_target() -> Option<PathBuf> {
+    // Optional explicit override for packaged releases.
+    if let Ok(from_env) = std::env::var("AGENTAUDIO_INSTALLER_PRECOMPILED_TARGET") {
+        let env_path = expand_tilde(&from_env);
+        if has_precompiled_release_artifacts(&env_path) {
+            return Some(env_path);
+        }
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+
+    let mut candidates = vec![
+        exe_dir.join("precompiled-target"),
+        exe_dir.join("target"),
+        exe_dir.join("resources").join("precompiled-target"),
+    ];
+
+    if let Some(parent) = exe_dir.parent() {
+        candidates.push(parent.join("precompiled-target"));
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| has_precompiled_release_artifacts(candidate))
+}
+
+fn has_precompiled_release_artifacts(target_dir: &Path) -> bool {
+    let release = target_dir.join("release");
+    let required = [
+        "libagentaudio_wrapper_vst3.so",
+        "agent-audio-scanner",
+        "agentaudio-mcp-routerd",
+        "agentaudio-mcp-stdio",
+        "agentaudio-mcp",
+    ];
+    required.iter().all(|name| release.join(name).is_file())
+}
+
 fn copy_executable(tx: &Sender<WorkerMsg>, from: &Path, to: &Path) -> Result<(), String> {
     if !from.exists() {
         return Err(format!(
@@ -658,8 +711,15 @@ fn bundle_and_install_vst3_linux(
 ) -> Result<(), String> {
     let arch = format!("{}-linux", std::env::consts::ARCH);
     let so = target_dir.join("release/libagentaudio_wrapper_vst3.so");
+    let scanner = target_dir.join("release/agent-audio-scanner");
     if !so.exists() {
         return Err(format!("Wrapper build output not found: {}", so.display()));
+    }
+    if !scanner.exists() {
+        return Err(format!(
+            "Scanner build output not found: {}",
+            scanner.display()
+        ));
     }
 
     let bundle_name = "AgentAudio Wrapper.vst3";
@@ -668,8 +728,21 @@ fn bundle_and_install_vst3_linux(
         let _ = fs::remove_dir_all(&bundle);
     }
     let contents_dir = bundle.join("Contents").join(&arch);
+    let resources_dir = bundle.join("Contents").join("Resources");
     fs::create_dir_all(&contents_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&resources_dir).map_err(|e| e.to_string())?;
     fs::copy(&so, contents_dir.join("AgentAudio Wrapper.so")).map_err(|e| e.to_string())?;
+    let scanner_dst = resources_dir.join("agent-audio-scanner");
+    fs::copy(&scanner, &scanner_dst).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&scanner_dst)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&scanner_dst, perms).map_err(|e| e.to_string())?;
+    }
     tx.send(WorkerMsg::Log(format!(
         "Created bundle {}",
         bundle.display()
