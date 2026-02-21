@@ -1258,26 +1258,29 @@ impl Plugin for AgentAudioWrapper {
                     );
                     ui.separator();
 
-                    ui.label("Load .vst3 bundle by path (paste path below; drag-and-drop is not supported in this host):");
+                    ui.label("Load .vst3 bundle:");
                     let mut path_to_load = gui_state
                         .lock()
                         .ok()
                         .map(|g| g.path_to_load.clone())
                         .unwrap_or_default();
                     let path_id = egui::Id::new("vst3_path");
-                    let path_response = ui.add(
-                        egui::TextEdit::singleline(&mut path_to_load)
-                            .hint_text("/path/to/Plugin.vst3")
-                            .id(path_id)
-                            .desired_width(ui.available_width() - 60.0),
-                    );
-                    if path_response.changed() {
-                        if let Ok(mut gs) = gui_state.lock() {
-                            gs.path_to_load = path_to_load.clone();
-                        }
-                    }
-                    ui.add_space(2.0);
-                    let load_clicked = ui.button("Load").clicked();
+                    let load_clicked = ui
+                        .horizontal(|ui| {
+                            let path_response = ui.add(
+                                egui::TextEdit::singleline(&mut path_to_load)
+                                    .hint_text("/path/to/Plugin.vst3")
+                                    .id(path_id)
+                                    .min_size(egui::vec2(280.0, 0.0)),
+                            );
+                            if path_response.changed() {
+                                if let Ok(mut gs) = gui_state.lock() {
+                                    gs.path_to_load = path_to_load.clone();
+                                }
+                            }
+                            ui.button("Load").clicked()
+                        })
+                        .inner;
                     if load_clicked {
                         let path = path_to_load.trim();
                         if path.is_empty() {
