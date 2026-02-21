@@ -189,6 +189,25 @@ Common errors:
 - queue full (realtime path)
 - unsupported child routing
 
+## Environment Variables
+
+### Documentation search paths
+
+- **`AGENTAUDIO_DOCS`** — Base directory for all docs. When set, plugin and sound-design docs are read from `$AGENTAUDIO_DOCS/plugins` and `$AGENTAUDIO_DOCS/sound-design` respectively.
+- **`AGENTAUDIO_PLUGIN_DOCS_DIR`** — Override plugin docs directory (e.g. `/path/to/docs/plugins`).
+- **`AGENTAUDIO_SOUND_DESIGN_DIR`** — Override sound-design guides directory (e.g. `/path/to/docs/sound-design`).
+- **`AGENTAUDIO_DOCS_REFRESH`** — When set to `1` or `true`, clears the doc index so the next search reloads files from disk.
+
+### Router daemon
+
+- **`AGENTAUDIO_MCP_ROUTERD_BIND`** — Bind address (default `127.0.0.1:38765`).
+- **`AGENTAUDIO_MCP_ROUTERD_TTL_MS`** — Instance heartbeat TTL in ms (default 15000).
+- **`AGENTAUDIO_MCP_ROUTERD_PRUNE_EVERY_MS`** — Prune interval in ms (default 2000).
+
+### Stdio shim
+
+- **`AGENTAUDIO_MCP_ROUTERD`** — Router HTTP base URL (default `http://127.0.0.1:38765`).
+
 ## See Also
 
 - `USAGE.md` for full wrapper-first setup

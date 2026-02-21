@@ -549,6 +549,27 @@ struct SetParamByNameRequest {
     pub value: f64,
 }
 
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+struct ListParamsRequest {
+    #[serde(default)]
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SearchParamsRequest {
+    pub query: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetParamsByNameRequest {
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetPatchStateRequest {
+    pub diff_only: Option<bool>,
+}
+
 #[derive(Default, Clone)]
 struct GuiState {
     /// User-entered path to a .vst3 bundle (e.g. /usr/lib/vst3/MyPlugin.vst3 or ~/.vst3/Synth.vst3)
@@ -636,10 +657,136 @@ impl WrapperMcpServer {
     }
 
     #[tool(
-        description = "List writable plugin parameters/knobs and current values. Use for parameter/knob/automation/tone edits."
+        description = "List writable plugin parameters/knobs and current values. Supports optional prefix filter. Use for parameter/knob/automation/tone edits."
     )]
-    fn list_params(&self) -> Result<String, String> {
+    fn list_params(
+        &self,
+        Parameters(req): Parameters<ListParamsRequest>,
+    ) -> Result<String, String> {
         self.with_child_plugin(|plugin| {
+            let count = plugin.get_parameter_count();
+            let prefix_lower = req
+                .prefix
+                .as_ref()
+                .map(|p| p.to_lowercase())
+                .filter(|p| !p.is_empty());
+            let mut parameters = Vec::new();
+            for i in 0..count {
+                if let Ok(info) = plugin.get_parameter_info(i) {
+                    if info.is_writable() && !info.is_hidden() {
+                        if let Some(ref pre) = prefix_lower {
+                            if !info.title.to_lowercase().starts_with(pre) {
+                                continue;
+                            }
+                        }
+                        let value = plugin.get_parameter(info.id);
+                        let display = plugin
+                            .get_parameter_display(info.id)
+                            .unwrap_or_else(|_| format!("{value:.3}"));
+                        parameters.push(serde_json::json!({
+                            "id": info.id,
+                            "name": info.title,
+                            "value": value,
+                            "display": display,
+                        }));
+                    }
+                }
+            }
+
+            let response = serde_json::json!({
+                "count": parameters.len(),
+                "parameters": parameters,
+            });
+            serde_json::to_string_pretty(&response)
+                .map_err(|e| format!("Serialization failed: {e}"))
+        })
+    }
+
+    #[tool(
+        description = "List logical parameter groups (e.g. 'Filter 1', 'Envelope 1') with counts. Use before list_params to discover available sections."
+    )]
+    fn list_param_groups(&self) -> Result<String, String> {
+        self.with_child_plugin(|plugin| {
+            let count = plugin.get_parameter_count();
+            let mut group_counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for i in 0..count {
+                if let Ok(info) = plugin.get_parameter_info(i) {
+                    if info.is_writable() && !info.is_hidden() {
+                        let group = param_group_prefix(&info.title);
+                        *group_counts.entry(group).or_default() += 1;
+                    }
+                }
+            }
+            let mut groups: Vec<serde_json::Value> = group_counts
+                .into_iter()
+                .map(|(group, count)| serde_json::json!({ "group": group, "count": count }))
+                .collect();
+            groups.sort_by(|a, b| {
+                a.get("group")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .cmp(b.get("group").and_then(|v| v.as_str()).unwrap_or_default())
+            });
+            let group_count = groups.len();
+            let response = serde_json::json!({
+                "groups": groups,
+                "count": group_count,
+            });
+            serde_json::to_string_pretty(&response)
+                .map_err(|e| format!("Serialization failed: {e}"))
+        })
+    }
+
+    #[tool(
+        description = "Search for parameters by name substring. Faster than find_vst_parameter when you know the param name."
+    )]
+    fn search_params(
+        &self,
+        Parameters(req): Parameters<SearchParamsRequest>,
+    ) -> Result<String, String> {
+        self.with_child_plugin(|plugin| {
+            let count = plugin.get_parameter_count();
+            let query_lower = req.query.to_lowercase();
+            let mut matches = Vec::new();
+            for i in 0..count {
+                if let Ok(info) = plugin.get_parameter_info(i) {
+                    if info.is_writable() && !info.is_hidden()
+                        && info.title.to_lowercase().contains(&query_lower)
+                    {
+                        let value = plugin.get_parameter(info.id);
+                        let display = plugin
+                            .get_parameter_display(info.id)
+                            .unwrap_or_else(|_| format!("{value:.3}"));
+                        matches.push(serde_json::json!({
+                            "id": info.id,
+                            "name": info.title,
+                            "value": value,
+                            "display": display,
+                            "units": info.units,
+                            "step_count": info.step_count
+                        }));
+                    }
+                }
+            }
+            let response = serde_json::json!({
+                "query": req.query,
+                "matches": matches,
+                "count": matches.len()
+            });
+            serde_json::to_string_pretty(&response)
+                .map_err(|e| format!("Serialization failed: {e}"))
+        })
+    }
+
+    #[tool(
+        description = "Batch lookup of parameter IDs by name (fuzzy match). Returns best match for each query."
+    )]
+    fn get_params_by_name(
+        &self,
+        Parameters(req): Parameters<GetParamsByNameRequest>,
+    ) -> Result<String, String> {
+        let params = self.with_child_plugin(|plugin| {
             let count = plugin.get_parameter_count();
             let mut parameters = Vec::new();
             for i in 0..count {
@@ -658,10 +805,80 @@ impl WrapperMcpServer {
                     }
                 }
             }
+            Ok::<_, String>(parameters)
+        })?;
+        let mut results = Vec::new();
+        for name in req.names {
+            let (primary, aliases) = query_terms_for_scoring(&name);
+            let mut scored: Vec<(u32, serde_json::Value)> = params
+                .iter()
+                .filter_map(|p| {
+                    let s = score_param(p, &primary, &aliases);
+                    if s > 0 {
+                        Some((s, p.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            if let Some((score, best_match)) = scored.first() {
+                results.push(serde_json::json!({
+                    "query": name,
+                    "match": best_match,
+                    "score": score
+                }));
+            } else {
+                results.push(serde_json::json!({
+                    "query": name,
+                    "match": serde_json::Value::Null,
+                    "score": 0
+                }));
+            }
+        }
+        let response = serde_json::json!({
+            "results": results,
+            "count": results.len()
+        });
+        serde_json::to_string_pretty(&response)
+            .map_err(|e| format!("Serialization failed: {e}"))
+    }
 
+    #[tool(
+        description = "Get current patch state (all non-default parameters). Useful for verifying changes or saving partial presets."
+    )]
+    fn get_patch_state(
+        &self,
+        Parameters(req): Parameters<GetPatchStateRequest>,
+    ) -> Result<String, String> {
+        let diff_only = req.diff_only.unwrap_or(true);
+        self.with_child_plugin(|plugin| {
+            let count = plugin.get_parameter_count();
+            let mut result = Vec::new();
+            for i in 0..count {
+                if let Ok(info) = plugin.get_parameter_info(i) {
+                    if !info.is_writable() || info.is_hidden() {
+                        continue;
+                    }
+                    let value = plugin.get_parameter(info.id);
+                    if diff_only && (value - info.default_normalized).abs() < 1e-4 {
+                        continue;
+                    }
+                    let display = plugin
+                        .get_parameter_display(info.id)
+                        .unwrap_or_else(|_| format!("{value:.3}"));
+                    result.push(serde_json::json!({
+                        "id": info.id,
+                        "name": info.title,
+                        "value": value,
+                        "display": display,
+                        "default": info.default_normalized
+                    }));
+                }
+            }
             let response = serde_json::json!({
-                "count": parameters.len(),
-                "parameters": parameters,
+                "parameters": result,
+                "count": result.len(),
             });
             serde_json::to_string_pretty(&response)
                 .map_err(|e| format!("Serialization failed: {e}"))
@@ -753,7 +970,7 @@ impl WrapperMcpServer {
         &self,
         Parameters(req): Parameters<FindVstParameterRequest>,
     ) -> Result<String, String> {
-        let raw = self.list_params()?;
+        let raw = self.list_params(Parameters(ListParamsRequest::default()))?;
         let params = parse_params_from_list_result(&raw)?;
         let terms = query_terms(&req.query);
         let limit = req.limit.unwrap_or(20).max(1);
@@ -783,7 +1000,7 @@ impl WrapperMcpServer {
         &self,
         Parameters(req): Parameters<PreviewVstParameterValuesRequest>,
     ) -> Result<String, String> {
-        let raw = self.list_params()?;
+        let raw = self.list_params(Parameters(ListParamsRequest::default()))?;
         let params = parse_params_from_list_result(&raw)?;
         let limit = req.limit.unwrap_or(20).max(1);
 
@@ -914,7 +1131,7 @@ impl WrapperMcpServer {
             ));
         }
 
-        let raw = self.list_params()?;
+        let raw = self.list_params(Parameters(ListParamsRequest::default()))?;
         let params = parse_params_from_list_result(&raw)?;
         let name_lower = req.name.to_lowercase();
 
@@ -956,6 +1173,27 @@ impl WrapperMcpServer {
             "instance_id": self.shared.instance_id.as_str(),
         });
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(
+        description = "Get param queue utilization. Use to detect when the queue is full and param changes are being dropped."
+    )]
+    fn param_queue_status(&self) -> Result<String, String> {
+        let queue_len = self.shared.param_queue.len();
+        let capacity = PARAM_QUEUE_CAPACITY;
+        let utilization_pct = if capacity > 0 {
+            (queue_len as f64 / capacity as f64) * 100.0
+        } else {
+            0.0
+        };
+        let response = serde_json::json!({
+            "queue_len": queue_len,
+            "capacity": capacity,
+            "utilization_pct": utilization_pct.round(),
+            "instance_id": self.shared.instance_id.as_str(),
+        });
+        serde_json::to_string_pretty(&response)
+            .map_err(|e| format!("Serialization failed: {e}"))
     }
 
     #[tool(description = "Get wrapper status and endpoint details.")]
@@ -1580,6 +1818,87 @@ fn hex_to_tuid(hex: &str) -> Result<[i8; 16], String> {
         tuid[i] = byte as i8;
     }
     Ok(tuid)
+}
+
+fn param_group_prefix(name: &str) -> String {
+    let parts: Vec<&str> = name.splitn(3, ' ').collect();
+    if parts.len() >= 2 && parts[1].parse::<u32>().is_ok() {
+        format!("{} {}", parts[0], parts[1])
+    } else {
+        parts.first().map(|s| (*s).to_string()).unwrap_or_default()
+    }
+}
+
+/// Returns (primary_terms, alias_terms) for scoring.
+fn query_terms_for_scoring(query: &str) -> (Vec<String>, Vec<String>) {
+    let lower = query.to_lowercase();
+    let primary: Vec<String> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    let mut aliases: Vec<String> = Vec::new();
+    if lower.contains("brighter") {
+        aliases.extend(
+            ["bright", "brightness", "treble", "presence"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+    }
+    if lower.contains("harsh") {
+        aliases.extend(
+            ["harsh", "resonance", "q", "presence"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+    }
+    if lower.contains("reverb") {
+        aliases.extend(["room", "wet"].iter().map(|s| s.to_string()));
+    }
+
+    aliases.retain(|a| !primary.contains(a));
+    aliases.sort();
+    aliases.dedup();
+    (primary, aliases)
+}
+
+fn score_param(param: &serde_json::Value, primary: &[String], aliases: &[String]) -> u32 {
+    let name = param
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let name_words: Vec<&str> = name.split_whitespace().collect();
+    let display = param
+        .get("display")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let mut score = 0u32;
+
+    for term in primary {
+        if name == *term {
+            score += 2000;
+        } else if name_words.iter().any(|w| *w == term.as_str()) {
+            score += 100;
+        } else if name.starts_with(term.as_str()) {
+            score += 80;
+        } else if name.contains(term.as_str()) {
+            score += 40;
+        }
+        if display.contains(term.as_str()) {
+            score += 5;
+        }
+    }
+    for term in aliases {
+        if name_words.iter().any(|w| *w == term.as_str()) {
+            score += 10;
+        } else if name.contains(term.as_str()) {
+            score += 3;
+        }
+    }
+    score
 }
 
 fn query_terms(query: &str) -> Vec<String> {

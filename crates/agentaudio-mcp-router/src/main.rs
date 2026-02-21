@@ -6,7 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::router::tool::ToolRouter,
@@ -17,6 +23,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tracing::{info_span, instrument};
 use tokio_util::sync::CancellationToken;
 
 type SharedRegistry = Arc<RwLock<HashMap<String, RegisteredInstance>>>;
@@ -46,10 +53,13 @@ struct UnregisterRequest {
     instance_id: String,
 }
 
+const PARAM_CACHE_TTL: Duration = Duration::from_secs(60);
+
 #[derive(Clone)]
 struct AppState {
     registry: SharedRegistry,
     default_instance_id: Arc<RwLock<Option<String>>>,
+    param_cache: Arc<RwLock<HashMap<String, (Vec<serde_json::Value>, Instant)>>>,
     started_at: Instant,
 }
 
@@ -184,7 +194,7 @@ struct SearchSoundDesignRequest {
 
 const AUDIO_INTENT_THRESHOLD: f64 = 0.55;
 
-const AUDIO_INTENT_TERMS: [(&str, f64); 23] = [
+const AUDIO_INTENT_TERMS: [(&str, f64); 28] = [
     ("vst", 1.0),
     ("plugin", 1.0),
     ("preset", 1.0),
@@ -208,6 +218,11 @@ const AUDIO_INTENT_TERMS: [(&str, f64); 23] = [
     ("harsh", 0.6),
     ("bright", 0.6),
     ("brighter", 0.6),
+    ("tipper", 0.9),
+    ("squelch", 0.9),
+    ("psytrance", 0.9),
+    ("acid", 0.8),
+    ("reese", 0.9),
 ];
 
 const DOCS_OR_NEWS_TERMS: [&str; 10] = [
@@ -253,7 +268,7 @@ const PARAMETER_TUNING_TERMS: [&str; 16] = [
     "less harsh",
 ];
 
-const HARD_AUDIO_ROUTE_TERMS_NON_PATCH: [&str; 13] = [
+const HARD_AUDIO_ROUTE_TERMS_NON_PATCH: [&str; 17] = [
     "vst",
     "plugin",
     "preset",
@@ -267,6 +282,10 @@ const HARD_AUDIO_ROUTE_TERMS_NON_PATCH: [&str; 13] = [
     "eq",
     "reverb",
     "synth",
+    "squelch",
+    "psytrance",
+    "acid",
+    "reese",
 ];
 
 // ---- Doc search helpers (inline, no extra dependency) ----
@@ -739,6 +758,18 @@ async fn unregister(
     )
 }
 
+async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    let reg = state.registry.read().await;
+    let instance_count = reg.len();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "instance_count": instance_count,
+        })),
+    )
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -748,6 +779,10 @@ fn env_u64(name: &str, default: u64) -> u64 {
 
 fn env_string(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
+}
+
+fn format_structured_error(error: &str, message: &str) -> String {
+    serde_json::json!({ "error": error, "message": message }).to_string()
 }
 
 fn now_ms() -> u64 {
@@ -794,38 +829,105 @@ impl RouterMcpServer {
         reg.get(instance_id)
             .map(|i| i.endpoint.clone())
             .ok_or_else(|| {
-                format!(
-                    "Unknown instance_id '{instance_id}'. Call list_instances to get valid IDs."
+                format_structured_error(
+                    "UnknownInstance",
+                    &format!(
+                        "Unknown instance_id '{instance_id}'. Call list_instances to get valid IDs."
+                    ),
                 )
             })
     }
 
+    #[instrument(skip(self, arguments), fields(instance_id = %instance_id, tool = %tool_name))]
     async fn call_wrapper_tool(
         &self,
         instance_id: &str,
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<String, String> {
+        const WRAPPER_TIMEOUT: Duration = Duration::from_secs(30);
+        const MAX_ATTEMPTS: u32 = 2;
+
         let endpoint = self.endpoint_for(instance_id).await?;
 
-        let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(endpoint);
-        let service = ()
-            .serve(transport)
-            .await
-            .map_err(|e| format!("Failed to connect to wrapper MCP endpoint: {e}"))?;
+        let mut last_err = String::new();
+        for attempt in 1..=MAX_ATTEMPTS {
+            let result = tokio::time::timeout(
+                WRAPPER_TIMEOUT,
+                async {
+                    let transport =
+                        rmcp::transport::StreamableHttpClientTransport::from_uri(endpoint.clone());
+                    let service = ()
+                        .serve(transport)
+                        .await
+                        .map_err(|e| format!("Failed to connect to wrapper MCP endpoint: {e}"))?;
 
-        let result = service
-            .call_tool(CallToolRequestParams {
-                meta: None,
-                name: Cow::Owned(tool_name.to_string()),
-                arguments,
-                task: None,
-            })
-            .await
-            .map_err(|e| format!("Wrapper tool call failed: {e}"))?;
+                    let result = service
+                        .call_tool(CallToolRequestParams {
+                            meta: None,
+                            name: Cow::Owned(tool_name.to_string()),
+                            arguments: arguments.clone(),
+                            task: None,
+                        })
+                        .await
+                        .map_err(|e| format!("Wrapper tool call failed: {e}"))?;
 
-        let _ = service.cancel().await;
-        call_tool_result_to_text(result)
+                    let _ = service.cancel().await;
+                    Ok::<_, String>(result)
+                },
+            )
+            .await;
+
+            match result {
+                Ok(Ok(res)) => return call_tool_result_to_text(res),
+                Ok(Err(e)) => {
+                    last_err = e;
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+                Err(_) => {
+                    last_err = format_structured_error(
+                        "Timeout",
+                        &format!(
+                            "Wrapper call timed out after {:?}. Instance {} may be unresponsive.",
+                            WRAPPER_TIMEOUT, instance_id
+                        ),
+                    );
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
+        }
+        Err(last_err)
+    }
+
+    #[instrument(skip(self), fields(instance_id = %instance_id))]
+    async fn get_cached_params_or_fetch(&self, instance_id: &str) -> Result<Vec<serde_json::Value>, String> {
+        let now = Instant::now();
+        {
+            let cache = self.state.param_cache.read().await;
+            if let Some((params, cached_at)) = cache.get(instance_id) {
+                if now.duration_since(*cached_at) < PARAM_CACHE_TTL {
+                    tracing::info!(cache_hit = true, param_count = params.len(), "param cache hit");
+                    return Ok(params.clone());
+                }
+            }
+        }
+        tracing::info!(cache_hit = false, "param cache miss, fetching list_params");
+        let raw = self.call_wrapper_tool(instance_id, "list_params", None).await?;
+        let params = parse_params_from_list_result(&raw)?;
+        {
+            let mut cache = self.state.param_cache.write().await;
+            cache.insert(instance_id.to_string(), (params.clone(), now));
+        }
+        Ok(params)
+    }
+
+    async fn invalidate_param_cache(&self, instance_id: &str) {
+        let mut cache = self.state.param_cache.write().await;
+        cache.remove(instance_id);
     }
 }
 
@@ -1000,8 +1102,7 @@ impl RouterMcpServer {
         Parameters(req): Parameters<ProxyFindVstParameterRequest>,
     ) -> Result<String, String> {
         let id = self.resolve_instance_id(req.instance_id).await?;
-        let raw = self.call_wrapper_tool(&id, "list_params", None).await?;
-        let params = parse_params_from_list_result(&raw)?;
+        let params = self.get_cached_params_or_fetch(&id).await?;
         let source_count = params.len();
         let (primary, aliases) = query_terms(&req.query);
         let limit = req.limit.unwrap_or(20).max(1);
@@ -1040,8 +1141,7 @@ impl RouterMcpServer {
         Parameters(req): Parameters<ProxyPreviewVstParameterValuesRequest>,
     ) -> Result<String, String> {
         let id = self.resolve_instance_id(req.instance_id).await?;
-        let raw = self.call_wrapper_tool(&id, "list_params", None).await?;
-        let params = parse_params_from_list_result(&raw)?;
+        let params = self.get_cached_params_or_fetch(&id).await?;
         let limit = req.limit.unwrap_or(20).max(1);
 
         let selected: Vec<serde_json::Value> = if let Some(ids) = req.ids {
@@ -1112,6 +1212,17 @@ impl RouterMcpServer {
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
     }
 
+    #[tool(
+        description = "Get param queue utilization. Use to detect when the queue is full and param changes are being dropped."
+    )]
+    async fn param_queue_status(
+        &self,
+        Parameters(req): Parameters<ProxyInstanceOnly>,
+    ) -> Result<String, String> {
+        let id = self.resolve_instance_id(req.instance_id).await?;
+        self.call_wrapper_tool(&id, "param_queue_status", None).await
+    }
+
     #[tool(description = "Get wrapper status and endpoint details.")]
     async fn wrapper_status(
         &self,
@@ -1154,7 +1265,11 @@ impl RouterMcpServer {
     ) -> Result<String, String> {
         let id = self.resolve_instance_id(req.instance_id).await?;
         let args = serde_json::json!({ "path": req.path }).as_object().cloned();
-        self.call_wrapper_tool(&id, "load_preset", args).await
+        let result = self.call_wrapper_tool(&id, "load_preset", args).await;
+        if result.is_ok() {
+            self.invalidate_param_cache(&id).await;
+        }
+        result
     }
 
     #[tool(
@@ -1277,14 +1392,21 @@ fn inject_docs_hint(raw: String) -> Result<String, String> {
 fn call_tool_result_to_text(result: CallToolResult) -> Result<String, String> {
     if result.is_error.unwrap_or(false) {
         if let Some(v) = result.structured_content {
-            return Err(v.to_string());
+            let s = v.to_string();
+            if s.trim_start().starts_with('{') {
+                return Err(s);
+            }
+            return Err(format_structured_error("ToolError", &s));
         }
         let msg = contents_to_text(&result.content);
-        return Err(if msg.is_empty() {
-            "Wrapper tool returned an error.".to_string()
-        } else {
-            msg
-        });
+        return Err(format_structured_error(
+            "ToolError",
+            &if msg.is_empty() {
+                "Wrapper tool returned an error.".to_string()
+            } else {
+                msg
+            },
+        ));
     }
 
     if let Some(v) = result.structured_content {
@@ -1385,6 +1507,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         registry: Arc::clone(&registry),
         default_instance_id: Arc::new(RwLock::new(None)),
+        param_cache: Arc::new(RwLock::new(HashMap::new())),
         started_at: Instant::now(),
     };
 
@@ -1422,6 +1545,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let app = Router::new()
+        .route("/health", get(health))
         .route("/register", post(register))
         .route("/heartbeat", post(heartbeat))
         .route("/unregister", post(unregister))

@@ -92,6 +92,55 @@ struct ProxyInstanceOnly {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyListParamsRequest {
+    pub instance_id: Option<String>,
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxySearchParamsRequest {
+    pub instance_id: Option<String>,
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyGetParamInfoRequest {
+    pub instance_id: Option<String>,
+    pub id: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyGetParamsByNameRequest {
+    pub instance_id: Option<String>,
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyGetPatchStateRequest {
+    pub instance_id: Option<String>,
+    pub diff_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxySavePresetRequest {
+    pub instance_id: Option<String>,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyLoadPresetRequest {
+    pub instance_id: Option<String>,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxySetParamByNameRequest {
+    pub instance_id: Option<String>,
+    pub name: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ProxySetParamRequest {
     pub instance_id: Option<String>,
     pub id: u32,
@@ -239,15 +288,135 @@ impl RouterStdioShim {
         self.call_router("close_child_editor", args).await
     }
 
-    #[tool(description = "List plugin parameters/knobs and current values.")]
+    #[tool(
+        description = "List plugin parameters/knobs and current values. Supports optional prefix filter."
+    )]
     async fn list_params(
+        &self,
+        Parameters(req): Parameters<ProxyListParamsRequest>,
+    ) -> Result<String, String> {
+        let mut obj = serde_json::Map::new();
+        if let Some(ref id) = req.instance_id {
+            obj.insert("instance_id".to_string(), serde_json::json!(id));
+        }
+        if let Some(ref prefix) = req.prefix {
+            obj.insert("prefix".to_string(), serde_json::json!(prefix));
+        }
+        let args = if obj.is_empty() { None } else { Some(obj) };
+        self.call_router("list_params", args).await
+    }
+
+    #[tool(
+        description = "List logical parameter groups (e.g. 'Filter 1', 'Envelope 1'). Use before list_params to discover sections."
+    )]
+    async fn list_param_groups(
         &self,
         Parameters(req): Parameters<ProxyInstanceOnly>,
     ) -> Result<String, String> {
         let args = serde_json::json!({ "instance_id": req.instance_id })
             .as_object()
             .cloned();
-        self.call_router("list_params", args).await
+        self.call_router("list_param_groups", args).await
+    }
+
+    #[tool(
+        description = "Search parameters by exact name substring. Faster when you know the param name."
+    )]
+    async fn search_params(
+        &self,
+        Parameters(req): Parameters<ProxySearchParamsRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({ "instance_id": req.instance_id, "query": req.query })
+            .as_object()
+            .cloned();
+        self.call_router("search_params", args).await
+    }
+
+    #[tool(
+        description = "Get parameter metadata and range probe. Use to understand display range before setting values."
+    )]
+    async fn get_param_info(
+        &self,
+        Parameters(req): Parameters<ProxyGetParamInfoRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({ "instance_id": req.instance_id, "id": req.id })
+            .as_object()
+            .cloned();
+        self.call_router("get_param_info", args).await
+    }
+
+    #[tool(
+        description = "Batch lookup of parameter IDs by name (fuzzy match). Returns best match for each query."
+    )]
+    async fn get_params_by_name(
+        &self,
+        Parameters(req): Parameters<ProxyGetParamsByNameRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({ "instance_id": req.instance_id, "names": req.names })
+            .as_object()
+            .cloned();
+        self.call_router("get_params_by_name", args).await
+    }
+
+    #[tool(
+        description = "Get current patch state (all non-default parameters). Useful for verifying changes."
+    )]
+    async fn get_current_patch_state(
+        &self,
+        Parameters(req): Parameters<ProxyGetPatchStateRequest>,
+    ) -> Result<String, String> {
+        let mut obj = serde_json::Map::new();
+        if let Some(ref id) = req.instance_id {
+            obj.insert("instance_id".to_string(), serde_json::json!(id));
+        }
+        if let Some(diff_only) = req.diff_only {
+            obj.insert("diff_only".to_string(), serde_json::json!(diff_only));
+        }
+        let args = if obj.is_empty() { None } else { Some(obj) };
+        self.call_router("get_current_patch_state", args).await
+    }
+
+    #[tool(
+        description = "Save current plugin state to a .vstpreset file. Use after patch edits."
+    )]
+    async fn save_preset(
+        &self,
+        Parameters(req): Parameters<ProxySavePresetRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({ "instance_id": req.instance_id, "path": req.path })
+            .as_object()
+            .cloned();
+        self.call_router("save_preset", args).await
+    }
+
+    #[tool(
+        description = "Load plugin state from a .vstpreset file. Requires a plugin already loaded."
+    )]
+    async fn load_preset(
+        &self,
+        Parameters(req): Parameters<ProxyLoadPresetRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({ "instance_id": req.instance_id, "path": req.path })
+            .as_object()
+            .cloned();
+        self.call_router("load_preset", args).await
+    }
+
+    #[tool(
+        description = "Set a parameter by name instead of id. Uses case-insensitive match."
+    )]
+    async fn set_param_by_name(
+        &self,
+        Parameters(req): Parameters<ProxySetParamByNameRequest>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({
+            "instance_id": req.instance_id,
+            "name": req.name,
+            "value": req.value
+        })
+        .as_object()
+        .cloned();
+        self.call_router("set_param_by_name", args).await
     }
 
     #[tool(description = "Set one realtime parameter value by id.")]
@@ -367,6 +536,19 @@ impl RouterStdioShim {
         .as_object()
         .cloned();
         self.call_router("guard_audio_routing", args).await
+    }
+
+    #[tool(
+        description = "Get param queue utilization. Use to detect when the queue is full."
+    )]
+    async fn param_queue_status(
+        &self,
+        Parameters(req): Parameters<ProxyInstanceOnly>,
+    ) -> Result<String, String> {
+        let args = serde_json::json!({ "instance_id": req.instance_id })
+            .as_object()
+            .cloned();
+        self.call_router("param_queue_status", args).await
     }
 
     #[tool(description = "Get wrapper status and endpoint details.")]
