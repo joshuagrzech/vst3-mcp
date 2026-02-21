@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Build a self-contained installer release bundle with precompiled artifacts.
+# This is the single supported build/release pipeline for this repository.
+# It performs a fresh clean build each run.
 #
 # Usage:
 #   ./scripts/master-release-installer.sh [output-dir]
@@ -41,14 +43,23 @@ if ! "${CARGO_CMD[@]}" metadata --format-version 1 --no-deps >/dev/null 2>&1; th
 fi
 
 echo "==> Using cargo command: ${CARGO_CMD[*]}"
-echo "==> Building release artifacts..."
-"${CARGO_CMD[@]}" build --release --manifest-path crates/agentaudio-wrapper-vst3/Cargo.toml
-"${CARGO_CMD[@]}" build --release \
+echo "==> Cleaning previous build outputs..."
+"${CARGO_CMD[@]}" clean
+
+echo "==> Cleaning previous release bundles..."
+mkdir -p "$OUT_DIR"
+rm -rf "$OUT_DIR"/agentaudio-master-installer-*
+rm -f "$OUT_DIR"/agentaudio-master-installer-*.tar.gz "$OUT_DIR"/agentaudio-master-installer-*.tar.gz.sha256
+
+echo "==> Building release artifacts (fresh, no incremental cache)..."
+export CARGO_INCREMENTAL=0
+"${CARGO_CMD[@]}" build --locked --release --manifest-path crates/agentaudio-wrapper-vst3/Cargo.toml
+"${CARGO_CMD[@]}" build --locked --release \
   --bin agent-audio-scanner \
   --bin agentaudio-mcp-stdio \
   --bin agentaudio-mcp \
   --bin agentaudio-installer
-"${CARGO_CMD[@]}" build --release -p agentaudio-mcp-router --bin agentaudio-mcp-routerd
+"${CARGO_CMD[@]}" build --locked --release -p agentaudio-mcp-router --bin agentaudio-mcp-routerd
 
 echo "==> Staging installer package..."
 rm -rf "$PACKAGE_DIR"
@@ -89,8 +100,9 @@ cat > "$PACKAGE_DIR/README.txt" <<EOF
 AgentAudio Master Installer Bundle
 =================================
 
-This package contains a precompiled installer and all required runtime artifacts.
-The installer auto-detects ./precompiled-target and defaults to "Skip build".
+This package is for end users. No Rust toolchain is required.
+The installer auto-detects ./precompiled-target and defaults to "Skip compile".
+Built via a fresh clean build (cargo clean + non-incremental release build).
 
 Contents:
 - agentaudio-installer                 (GUI installer)
@@ -102,16 +114,23 @@ Contents:
   - agentaudio-mcp-stdio
   - agentaudio-mcp
 
-Usage:
-1. Unpack this directory on the target Linux machine.
+Quick start:
+1. Unpack this directory on a Linux desktop machine.
 2. Run: ./run-installer.sh
-3. Click "Install" in the UI.
+3. In the installer UI, keep defaults and click "Install Now".
+4. Open your DAW, insert "AgentAudio Wrapper", load a plugin, then use MCP tools.
 
 Expected installer behavior (no compile step):
 - Place the VST3 wrapper in your chosen plugin directory.
 - Install router/client binaries to ~/.local/bin.
 - Enable/start agentaudio-mcp-routerd as a systemd --user service.
 - Patch Claude/Gemini/Cursor MCP configurations.
+
+Troubleshooting:
+- If service setup fails, confirm systemd user services are available:
+  systemctl --user status
+- If your DAW cannot find the wrapper plugin, rescan VST3 directories.
+- If MCP cannot connect, verify router URL is http://127.0.0.1:38765.
 EOF
 
 echo "==> Creating compressed archive..."
