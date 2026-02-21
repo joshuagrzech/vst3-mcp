@@ -43,6 +43,7 @@ const PLATFORM_TYPE_HWND: &[u8] = b"HWND\0";
 const PLATFORM_TYPE_NSVIEW: &[u8] = b"NSView\0";
 
 /// Runtime-selected editor embedding platform.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 enum EditorPlatform {
     X11(u32),
