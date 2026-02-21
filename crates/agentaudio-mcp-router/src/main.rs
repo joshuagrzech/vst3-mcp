@@ -116,9 +116,9 @@ struct GuardAudioRoutingRequest {
     pub requested_tool: Option<String>,
 }
 
-const AUDIO_INTENT_THRESHOLD: f64 = 0.60;
+const AUDIO_INTENT_THRESHOLD: f64 = 0.55;
 
-const AUDIO_INTENT_TERMS: [(&str, f64); 18] = [
+const AUDIO_INTENT_TERMS: [(&str, f64); 23] = [
     ("vst", 1.0),
     ("plugin", 1.0),
     ("preset", 1.0),
@@ -135,8 +135,13 @@ const AUDIO_INTENT_TERMS: [(&str, f64); 18] = [
     ("release", 0.7),
     ("serum", 0.9),
     ("fabfilter", 0.9),
+    ("pro-q", 0.8),
+    ("pro q", 0.8),
     ("cutoff", 0.7),
     ("resonance", 0.7),
+    ("harsh", 0.6),
+    ("bright", 0.6),
+    ("brighter", 0.6),
 ];
 
 const DOCS_OR_NEWS_TERMS: [&str; 10] = [
@@ -163,10 +168,11 @@ const CODE_PATCH_TERMS: [&str; 8] = [
     ".diff",
 ];
 
-const PARAMETER_TUNING_TERMS: [&str; 15] = [
+const PARAMETER_TUNING_TERMS: [&str; 16] = [
     "parameter",
     "knob",
     "automation",
+    "automate",
     "attack",
     "release",
     "threshold",
@@ -181,8 +187,34 @@ const PARAMETER_TUNING_TERMS: [&str; 15] = [
     "less harsh",
 ];
 
+const HARD_AUDIO_ROUTE_TERMS_NON_PATCH: [&str; 13] = [
+    "vst",
+    "plugin",
+    "preset",
+    "sound",
+    "tone",
+    "parameter",
+    "knob",
+    "automation",
+    "automate",
+    "compressor",
+    "eq",
+    "reverb",
+    "synth",
+];
+
 fn contains_any(lower: &str, terms: &[&str]) -> bool {
-    terms.iter().any(|term| lower.contains(term))
+    terms.iter().any(|term| contains_term(lower, term))
+}
+
+fn contains_term(lower: &str, term: &str) -> bool {
+    if term.len() <= 2 {
+        lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token == term)
+    } else {
+        lower.contains(term)
+    }
 }
 
 fn query_terms(query: &str) -> Vec<String> {
@@ -237,7 +269,7 @@ fn parameter_matches_query(param: &serde_json::Value, terms: &[String]) -> bool 
         .to_lowercase();
     let haystack = format!("{name} {display}");
 
-    terms.iter().any(|term| haystack.contains(term))
+    terms.iter().any(|term| contains_term(&haystack, term))
 }
 
 fn parse_params_from_list_result(raw: &str) -> Result<Vec<serde_json::Value>, String> {
@@ -307,6 +339,12 @@ fn choose_audio_first_tool(user_message: &str) -> &'static str {
     } else {
         "scan_plugins"
     }
+}
+
+fn hard_audio_route_trigger(user_message: &str, patch_interpretation: &str) -> bool {
+    let lower = user_message.to_lowercase();
+    contains_any(&lower, &HARD_AUDIO_ROUTE_TERMS_NON_PATCH)
+        || (lower.contains("patch") && patch_interpretation == "audio_patch")
 }
 
 async fn register(
@@ -683,11 +721,13 @@ impl RouterMcpServer {
     ) -> Result<String, String> {
         let (confidence, matched_terms, patch_interpretation) =
             audio_intent_analysis(&req.user_message);
+        let hard_trigger = hard_audio_route_trigger(&req.user_message, patch_interpretation);
         let requested_tool = req.requested_tool.unwrap_or_default();
         let explicit_docs_or_news =
             contains_any(&req.user_message.to_lowercase(), &DOCS_OR_NEWS_TERMS)
                 || contains_any(&requested_tool.to_lowercase(), &DOCS_OR_NEWS_TERMS);
-        let block_web_search = confidence >= AUDIO_INTENT_THRESHOLD && !explicit_docs_or_news;
+        let block_web_search =
+            (confidence >= AUDIO_INTENT_THRESHOLD || hard_trigger) && !explicit_docs_or_news;
         let recommended_first_tool = if block_web_search {
             choose_audio_first_tool(&req.user_message)
         } else {
@@ -697,6 +737,7 @@ impl RouterMcpServer {
         let response = serde_json::json!({
             "audio_intent_confidence": confidence,
             "threshold": AUDIO_INTENT_THRESHOLD,
+            "hard_audio_trigger": hard_trigger,
             "matched_terms": matched_terms,
             "patch_interpretation": patch_interpretation,
             "explicit_docs_or_news_request": explicit_docs_or_news,
@@ -811,10 +852,12 @@ mod tests {
         assert!(cases.len() >= 20, "expected at least 20 eval prompts");
 
         for case in cases {
-            let (confidence, _, _) = audio_intent_analysis(&case.prompt);
+            let (confidence, _, patch_interpretation) = audio_intent_analysis(&case.prompt);
+            let hard_trigger = hard_audio_route_trigger(&case.prompt, patch_interpretation);
             let explicit_docs_or_news =
                 contains_any(&case.prompt.to_lowercase(), &DOCS_OR_NEWS_TERMS);
-            let block_web_search = confidence >= AUDIO_INTENT_THRESHOLD && !explicit_docs_or_news;
+            let block_web_search =
+                (confidence >= AUDIO_INTENT_THRESHOLD || hard_trigger) && !explicit_docs_or_news;
             assert_eq!(
                 block_web_search, case.expected_block_web_search,
                 "block_web_search mismatch for prompt: {}",
