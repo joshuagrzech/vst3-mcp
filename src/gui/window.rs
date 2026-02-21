@@ -1,14 +1,19 @@
 //! EditorWindow: winit window creation and IPlugView lifecycle management.
 //!
-//! Opens a native X11 window, attaches the VST3 plugin's IPlugView editor,
-//! handles XEmbed protocol handshake, and dispatches IRunLoop events in
-//! the winit event loop.
+//! Opens a native window, attaches the VST3 plugin's IPlugView editor, and
+//! dispatches IRunLoop events in the winit event loop.
+//! On Linux/X11, this also performs the XEmbed handshake.
 
 use std::ffi::c_void;
-use std::os::fd::BorrowedFd;
-use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::fd::BorrowedFd;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
+#[cfg(not(unix))]
+type RawFd = i32;
 
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 use tracing::{debug, error, info, warn};
@@ -32,6 +37,58 @@ use super::xembed::{self, XEmbedAtoms};
 
 /// The VST3 platform type string for X11 embedding.
 const PLATFORM_TYPE_X11: &[u8] = b"X11EmbedWindowID\0";
+/// The VST3 platform type string for Win32 HWND embedding.
+const PLATFORM_TYPE_HWND: &[u8] = b"HWND\0";
+/// The VST3 platform type string for macOS NSView embedding.
+const PLATFORM_TYPE_NSVIEW: &[u8] = b"NSView\0";
+
+/// Runtime-selected editor embedding platform.
+#[derive(Clone, Copy, Debug)]
+enum EditorPlatform {
+    X11(u32),
+    Hwnd(*mut c_void),
+    NsView(*mut c_void),
+}
+
+impl EditorPlatform {
+    fn platform_type(self) -> &'static [u8] {
+        match self {
+            Self::X11(_) => PLATFORM_TYPE_X11,
+            Self::Hwnd(_) => PLATFORM_TYPE_HWND,
+            Self::NsView(_) => PLATFORM_TYPE_NSVIEW,
+        }
+    }
+
+    fn parent_handle(self) -> *mut c_void {
+        match self {
+            Self::X11(window_id) => window_id as usize as *mut c_void,
+            Self::Hwnd(hwnd) => hwnd,
+            Self::NsView(ns_view) => ns_view,
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::X11(_) => "X11EmbedWindowID",
+            Self::Hwnd(_) => "HWND",
+            Self::NsView(_) => "NSView",
+        }
+    }
+}
+
+/// Linux/X11-specific embedding state.
+struct X11EmbedState {
+    /// X11 connection for XEmbed protocol.
+    conn: RustConnection,
+    /// XEmbed atoms.
+    atoms: XEmbedAtoms,
+    /// The X11 Window ID of our parent window.
+    parent_window_id: u32,
+    /// The X11 Window ID of the plugin's child window (detected via CreateNotify).
+    plugin_window_id: Option<u32>,
+    /// Whether the XEmbed handshake is complete.
+    _xembed_complete: bool,
+}
 
 /// State for the editor window once created.
 struct EditorState {
@@ -41,26 +98,24 @@ struct EditorState {
     plug_view: ComPtr<IPlugView>,
     /// The IPlugFrame COM wrapper (must stay alive while plug_view references it).
     _plug_frame: ComWrapper<PlugFrame>,
-    /// X11 connection for XEmbed protocol.
-    x11_conn: RustConnection,
-    /// XEmbed atoms.
-    xembed_atoms: XEmbedAtoms,
-    /// The X11 Window ID of our parent window.
-    parent_window_id: u32,
-    /// The X11 Window ID of the plugin's child window (detected via CreateNotify).
-    plugin_window_id: Option<u32>,
+    /// Platform used for IPlugView::attached.
+    platform: EditorPlatform,
+    /// Linux/X11-only embedding state.
+    x11: Option<X11EmbedState>,
     /// Shared run loop for timer/FD dispatch.
     runloop: Arc<HostRunLoop>,
     /// Poller for FD monitoring.
     poller: Poller,
     /// Buffer for poll events.
     poll_events: Events,
-    /// Whether the XEmbed handshake is complete.
-    xembed_complete: bool,
     /// Pending resize from IPlugFrame::resizeView (shared with PlugFrame).
     pending_resize: super::plugframe::PendingResize,
     /// Current window size in physical pixels (tracks actual size to skip no-op resizes).
     current_size: (u32, u32),
+    /// Prevents duplicate onSize() when host-initiated resizes re-enter via WindowEvent::Resized.
+    pending_host_resize_event: Option<(u32, u32)>,
+    /// Whether the plugin reports user-resizable editor support.
+    plugin_can_resize: bool,
 }
 
 /// Application handler for the editor window event loop.
@@ -154,39 +209,13 @@ impl ApplicationHandler for EditorApp {
             }
             WindowEvent::Focused(focused) => {
                 if let Some(state) = &self.state {
-                    if let Some(plugin_wid) = state.plugin_window_id {
-                        if focused {
-                            let _ = xembed::send_window_activate(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
-                                plugin_wid,
-                            );
-                            let _ = xembed::send_focus_in(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
-                                plugin_wid,
-                            );
-                        } else {
-                            let _ = xembed::send_focus_out(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
-                                plugin_wid,
-                            );
-                            let _ = xembed::send_window_deactivate(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
-                                plugin_wid,
-                            );
-                        }
-                    }
+                    send_focus_change(state, focused);
                 }
             }
-            WindowEvent::Resized(_size) => {
-                // Do NOT call plug_view.onSize() here.
-                // Resize is handled via the pending_resize mechanism in about_to_wait,
-                // which calls onSize exactly once per resizeView request.
-                // Calling onSize from here causes a feedback loop where the plugin
-                // repositions its child window on every frame.
+            WindowEvent::Resized(size) => {
+                if let Some(state) = &mut self.state {
+                    apply_host_resize(state, size.width.max(1), size.height.max(1));
+                }
             }
             _ => {}
         }
@@ -251,15 +280,8 @@ fn create_editor_state(
         ComPtr::from_raw(view_ptr).ok_or_else(|| "Invalid IPlugView pointer".to_string())?
     };
 
-    // Check platform support
-    let supported =
-        unsafe { plug_view.isPlatformTypeSupported(PLATFORM_TYPE_X11.as_ptr() as *const i8) };
-    if supported != kResultOk {
-        return Err(format!(
-            "Plugin doesn't support X11EmbedWindowID (returned {})",
-            supported
-        ));
-    }
+    // Query plugin resize capabilities before creating the host window.
+    let plugin_can_resize = unsafe { plug_view.canResize() == kResultOk };
 
     // Query plugin's preferred size
     let mut view_rect: ViewRect = ViewRect {
@@ -286,11 +308,12 @@ fn create_editor_state(
     // Drop plugin lock before creating window (no longer needed)
     drop(plugin_guard);
 
-    // Create winit window (not user-resizable; plugin controls size via resizeView)
+    // Create winit window. If the plugin supports resizing, allow the user to
+    // resize the outer host window too so host/plugin stay in sync.
     let window_attrs = WindowAttributes::default()
         .with_title(format!("{} - Plugin Editor", plugin_name))
         .with_inner_size(PhysicalSize::new(width, height))
-        .with_resizable(false);
+        .with_resizable(plugin_can_resize);
 
     let window = Arc::new(
         event_loop
@@ -298,34 +321,36 @@ fn create_editor_state(
             .map_err(|e| format!("Failed to create window: {}", e))?,
     );
 
-    // Get X11 Window ID from winit
-    let parent_window_id = get_x11_window_id(&window)?;
+    // Resolve the native window handle to a VST3 embedding platform.
+    let platform = detect_editor_platform(&window)?;
+    let supported =
+        unsafe { plug_view.isPlatformTypeSupported(platform.platform_type().as_ptr() as *const i8) };
+    if supported != kResultOk {
+        return Err(format!(
+            "Plugin doesn't support {} (returned {})",
+            platform.display_name(),
+            supported
+        ));
+    }
 
-    info!(
-        "Created host window {:08X} ({}x{}) for '{}'",
-        parent_window_id, width, height, plugin_name
-    );
+    let x11 = match platform {
+        EditorPlatform::X11(parent_window_id) => Some(init_x11_embed_state(parent_window_id)?),
+        EditorPlatform::Hwnd(_) | EditorPlatform::NsView(_) => None,
+    };
 
-    // Establish direct X11 connection for XEmbed protocol
-    let (x11_conn, _screen_num) =
-        RustConnection::connect(None).map_err(|e| format!("X11 connect failed: {}", e))?;
-
-    // Intern XEmbed atoms
-    let xembed_atoms = XEmbedAtoms::new(&x11_conn)
-        .map_err(|e| format!("Failed to create XEmbed atom cookies: {}", e))?
-        .reply()
-        .map_err(|e| format!("Failed to intern XEmbed atoms: {}", e))?;
-
-    // Select SubstructureNotify events on parent window to detect plugin's child window
-    x11_conn
-        .change_window_attributes(
-            parent_window_id,
-            &ChangeWindowAttributesAux::new()
-                .event_mask(EventMask::SUBSTRUCTURE_NOTIFY | EventMask::FOCUS_CHANGE),
-        )
-        .map_err(|e| format!("Failed to select X11 events: {}", e))?
-        .check()
-        .map_err(|e| format!("Failed to apply X11 event mask: {}", e))?;
+    match platform {
+        EditorPlatform::X11(parent_window_id) => info!(
+            "Created host window {:08X} ({}x{}) for '{}'",
+            parent_window_id, width, height, plugin_name
+        ),
+        EditorPlatform::Hwnd(_) | EditorPlatform::NsView(_) => info!(
+            "Created host window via {} backend ({}x{}) for '{}'",
+            platform.display_name(),
+            width,
+            height,
+            plugin_name
+        ),
+    }
 
     // Shared pending resize slot (PlugFrame writes, event loop reads)
     let pending_resize: super::plugframe::PendingResize = Arc::new(Mutex::new(None));
@@ -345,11 +370,11 @@ fn create_editor_state(
         }
     }
 
-    // Attach plugin view to our X11 window
+    // Attach plugin view to the host's native window.
     unsafe {
         let result = plug_view.attached(
-            parent_window_id as usize as *mut c_void,
-            PLATFORM_TYPE_X11.as_ptr() as *const i8,
+            platform.parent_handle(),
+            platform.platform_type().as_ptr() as *const i8,
         );
         if result != kResultOk {
             // Clean up on failure
@@ -359,32 +384,36 @@ fn create_editor_state(
     }
 
     info!(
-        "Plugin editor attached to X11 window {:08X}",
-        parent_window_id
+        "Plugin editor attached with platform {}",
+        platform.display_name()
     );
 
     // Create poller for FD monitoring
     let poller = Poller::new().map_err(|e| format!("Failed to create poller: {}", e))?;
 
-    Ok(EditorState {
+    let mut state = EditorState {
         window,
         plug_view,
         _plug_frame: plug_frame,
-        x11_conn,
-        xembed_atoms,
-        parent_window_id,
-        plugin_window_id: None,
+        platform,
+        x11,
         runloop,
         poller,
         poll_events: Events::new(),
-        xembed_complete: false,
         pending_resize,
         current_size: (width, height),
-    })
+        pending_host_resize_event: None,
+        plugin_can_resize,
+    };
+
+    // Keep host and plugin on the exact same initial size to avoid black gutters.
+    notify_plugin_size(&mut state, width, height);
+
+    Ok(state)
 }
 
-/// Extract X11 Window ID from a winit window using raw-window-handle.
-fn get_x11_window_id(window: &Window) -> Result<u32, String> {
+/// Resolve the native window handle to a VST3 embedding platform.
+fn detect_editor_platform(window: &Window) -> Result<EditorPlatform, String> {
     use raw_window_handle::HasWindowHandle;
 
     let handle = window
@@ -392,10 +421,68 @@ fn get_x11_window_id(window: &Window) -> Result<u32, String> {
         .map_err(|e| format!("Failed to get window handle: {}", e))?;
 
     match handle.as_raw() {
-        raw_window_handle::RawWindowHandle::Xlib(xlib) => Ok(xlib.window as u32),
-        raw_window_handle::RawWindowHandle::Xcb(xcb) => Ok(xcb.window.get()),
-        other => Err(format!("Not running on X11 (got {:?})", other)),
+        raw_window_handle::RawWindowHandle::Xlib(xlib) => Ok(EditorPlatform::X11(xlib.window as u32)),
+        raw_window_handle::RawWindowHandle::Xcb(xcb) => Ok(EditorPlatform::X11(xcb.window.get())),
+        raw_window_handle::RawWindowHandle::Win32(win32) => {
+            #[cfg(target_os = "windows")]
+            {
+                Ok(EditorPlatform::Hwnd(win32.hwnd.get() as usize as *mut c_void))
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = win32;
+                Err("Received Win32 handle on non-Windows build".to_string())
+            }
+        }
+        raw_window_handle::RawWindowHandle::AppKit(appkit) => {
+            #[cfg(target_os = "macos")]
+            {
+                Ok(EditorPlatform::NsView(appkit.ns_view.as_ptr()))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = appkit;
+                Err("Received AppKit handle on non-macOS build".to_string())
+            }
+        }
+        raw_window_handle::RawWindowHandle::Wayland(_) => Err(
+            "Wayland native handles are not directly supported by VST3 IPlugView attachment; \
+             on Linux this host runs with X11/XWayland for editor embedding."
+                .to_string(),
+        ),
+        other => Err(format!(
+            "Unsupported window backend for VST3 editor embedding: {:?}",
+            other
+        )),
     }
+}
+
+/// Create Linux/X11 embedding state (XEmbed atoms + event mask).
+fn init_x11_embed_state(parent_window_id: u32) -> Result<X11EmbedState, String> {
+    let (conn, _screen_num) =
+        RustConnection::connect(None).map_err(|e| format!("X11 connect failed: {}", e))?;
+
+    let atoms = XEmbedAtoms::new(&conn)
+        .map_err(|e| format!("Failed to create XEmbed atom cookies: {}", e))?
+        .reply()
+        .map_err(|e| format!("Failed to intern XEmbed atoms: {}", e))?;
+
+    conn.change_window_attributes(
+        parent_window_id,
+        &ChangeWindowAttributesAux::new()
+            .event_mask(EventMask::SUBSTRUCTURE_NOTIFY | EventMask::FOCUS_CHANGE),
+    )
+    .map_err(|e| format!("Failed to select X11 events: {}", e))?
+    .check()
+    .map_err(|e| format!("Failed to apply X11 event mask: {}", e))?;
+
+    Ok(X11EmbedState {
+        conn,
+        atoms,
+        parent_window_id,
+        plugin_window_id: None,
+        _xembed_complete: false,
+    })
 }
 
 /// Apply a pending resize request from IPlugFrame::resizeView.
@@ -417,44 +504,144 @@ fn apply_pending_resize(state: &mut EditorState) {
         }
 
         // Resize the host window
+        state.pending_host_resize_event = Some((w, h));
         let _ = state.window.request_inner_size(PhysicalSize::new(w, h));
 
-        // Notify the plugin of the new size
-        let mut rect = ViewRect {
-            left: 0,
-            top: 0,
-            right: w as i32,
-            bottom: h as i32,
-        };
-        unsafe {
-            let result = state.plug_view.onSize(&mut rect);
-            if result != kResultOk {
-                debug!("IPlugView::onSize({w}x{h}) returned {result}");
-            }
-        }
-
-        state.current_size = (w, h);
+        notify_plugin_size(state, w, h);
         debug!("Applied pending resize: {}x{}", w, h);
+    }
+}
+
+/// Apply a resize initiated by the host window manager/user.
+fn apply_host_resize(state: &mut EditorState, requested_w: u32, requested_h: u32) {
+    let requested = (requested_w.max(1), requested_h.max(1));
+
+    if let Some(expected) = state.pending_host_resize_event {
+        if expected == requested {
+            state.pending_host_resize_event = None;
+            state.current_size = requested;
+            return;
+        }
+        // The WM delivered a different size than requested; treat this as a fresh resize.
+        state.pending_host_resize_event = None;
+    }
+
+    if requested == state.current_size {
+        return;
+    }
+
+    // If plugin says its editor is fixed-size, snap the outer host window back.
+    if !state.plugin_can_resize {
+        let (w, h) = state.current_size;
+        state.pending_host_resize_event = Some((w, h));
+        let _ = state.window.request_inner_size(PhysicalSize::new(w, h));
+        return;
+    }
+
+    let constrained = constrain_host_resize(state, requested.0, requested.1);
+    if constrained != requested {
+        state.pending_host_resize_event = Some(constrained);
+        let _ = state
+            .window
+            .request_inner_size(PhysicalSize::new(constrained.0, constrained.1));
+    }
+
+    if constrained != state.current_size {
+        notify_plugin_size(state, constrained.0, constrained.1);
+    }
+}
+
+/// Ask the plugin to constrain a host-requested size.
+fn constrain_host_resize(state: &EditorState, requested_w: u32, requested_h: u32) -> (u32, u32) {
+    let mut rect = ViewRect {
+        left: 0,
+        top: 0,
+        right: requested_w as i32,
+        bottom: requested_h as i32,
+    };
+
+    unsafe {
+        let result = state.plug_view.checkSizeConstraint(&mut rect);
+        if result != kResultOk {
+            return (requested_w, requested_h);
+        }
+    }
+
+    (
+        (rect.right - rect.left).max(1) as u32,
+        (rect.bottom - rect.top).max(1) as u32,
+    )
+}
+
+/// Notify the plugin view about the current host window size.
+fn notify_plugin_size(state: &mut EditorState, w: u32, h: u32) {
+    let mut rect = ViewRect {
+        left: 0,
+        top: 0,
+        right: w as i32,
+        bottom: h as i32,
+    };
+    unsafe {
+        let result = state.plug_view.onSize(&mut rect);
+        if result != kResultOk {
+            debug!("IPlugView::onSize({w}x{h}) returned {result}");
+        }
+    }
+    state.current_size = (w, h);
+
+    // Keep X11 child window aligned and sized to match the host.
+    if let Some(x11) = state.x11.as_mut() {
+        if let Some(child) = x11.plugin_window_id {
+            if let Ok(cookie) = x11.conn.configure_window(
+                child,
+                &ConfigureWindowAux::new().x(0).y(0).width(w).height(h),
+            ) {
+                let _ = cookie.check();
+            }
+            let _ = x11.conn.flush();
+        }
+    }
+}
+
+/// Forward host focus changes to embedded X11 children (XEmbed).
+fn send_focus_change(state: &EditorState, focused: bool) {
+    let Some(x11) = state.x11.as_ref() else {
+        return;
+    };
+    let Some(plugin_wid) = x11.plugin_window_id else {
+        return;
+    };
+
+    if focused {
+        let _ = xembed::send_window_activate(&x11.conn, &x11.atoms, plugin_wid);
+        let _ = xembed::send_focus_in(&x11.conn, &x11.atoms, plugin_wid);
+    } else {
+        let _ = xembed::send_focus_out(&x11.conn, &x11.atoms, plugin_wid);
+        let _ = xembed::send_window_deactivate(&x11.conn, &x11.atoms, plugin_wid);
     }
 }
 
 /// Poll X11 events for CreateNotify (plugin child window creation).
 fn poll_x11_events(state: &mut EditorState) {
+    let Some(x11) = state.x11.as_mut() else {
+        return;
+    };
+
     loop {
-        match state.x11_conn.poll_for_event() {
+        match x11.conn.poll_for_event() {
             Ok(Some(event)) => {
                 match event {
                     x11rb::protocol::Event::CreateNotify(create) => {
-                        if create.parent == state.parent_window_id {
+                        if create.parent == x11.parent_window_id {
                             let child_id = create.window;
-                            let prev_child = state.plugin_window_id;
-                            if state.plugin_window_id.is_none() {
-                                state.plugin_window_id = Some(child_id);
+                            let prev_child = x11.plugin_window_id;
+                            if x11.plugin_window_id.is_none() {
+                                x11.plugin_window_id = Some(child_id);
                             }
 
                             info!(
                                 "Plugin created child window {:08X} inside parent {:08X}",
-                                child_id, state.parent_window_id
+                                child_id, x11.parent_window_id
                             );
 
                             // Only do the initial XEmbed handshake for the first tracked child.
@@ -463,10 +650,10 @@ fn poll_x11_events(state: &mut EditorState) {
                             if prev_child.is_none() {
                                 // Complete XEmbed handshake
                                 if let Err(e) = xembed::send_embedded_notify(
-                                    &state.x11_conn,
-                                    &state.xembed_atoms,
+                                    &x11.conn,
+                                    &x11.atoms,
                                     child_id,
-                                    state.parent_window_id,
+                                    x11.parent_window_id,
                                 ) {
                                     warn!("Failed to send XEMBED_EMBEDDED_NOTIFY: {}", e);
                                 } else {
@@ -474,18 +661,10 @@ fn poll_x11_events(state: &mut EditorState) {
                                 }
 
                                 // Send window activate and focus
-                                let _ = xembed::send_window_activate(
-                                    &state.x11_conn,
-                                    &state.xembed_atoms,
-                                    child_id,
-                                );
-                                let _ = xembed::send_focus_in(
-                                    &state.x11_conn,
-                                    &state.xembed_atoms,
-                                    child_id,
-                                );
+                                let _ = xembed::send_window_activate(&x11.conn, &x11.atoms, child_id);
+                                let _ = xembed::send_focus_in(&x11.conn, &x11.atoms, child_id);
 
-                                state.xembed_complete = true;
+                                x11._xembed_complete = true;
                                 info!("XEmbed handshake complete for child {:08X}", child_id);
                             }
                         }
@@ -494,16 +673,16 @@ fn poll_x11_events(state: &mut EditorState) {
                         // If the plugin child starts drifting, force it back to origin.
                         // Vital appears to emit ConfigureNotify with increasing x/y; keeping
                         // the embedded child at (0,0) prevents duplicate/partially visible views.
-                        if state.plugin_window_id.is_some_and(|w| w == cfg.window)
+                        if x11.plugin_window_id.is_some_and(|w| w == cfg.window)
                             && (cfg.x != 0 || cfg.y != 0)
                         {
-                            if let Ok(cookie) = state
-                                .x11_conn
+                            if let Ok(cookie) = x11
+                                .conn
                                 .configure_window(cfg.window, &ConfigureWindowAux::new().x(0).y(0))
                             {
                                 let _ = cookie.check();
                             }
-                            let _ = state.x11_conn.flush();
+                            let _ = x11.conn.flush();
                         }
                     }
                     x11rb::protocol::Event::MapNotify(_map) => {
@@ -525,6 +704,7 @@ fn poll_x11_events(state: &mut EditorState) {
 }
 
 /// Poll registered FDs and dispatch to IRunLoop event handlers.
+#[cfg(unix)]
 fn poll_and_dispatch_fds(state: &mut EditorState) {
     let fds = state.runloop.get_registered_fds();
     if fds.is_empty() {
@@ -571,9 +751,16 @@ fn poll_and_dispatch_fds(state: &mut EditorState) {
     }
 }
 
+/// Poll registered FDs and dispatch to IRunLoop event handlers.
+#[cfg(not(unix))]
+fn poll_and_dispatch_fds(_state: &mut EditorState) {}
+
 impl Drop for EditorState {
     fn drop(&mut self) {
-        info!("Cleaning up editor state");
+        info!(
+            "Cleaning up editor state for {}",
+            self.platform.display_name()
+        );
 
         // Detach plugin view BEFORE dropping the window
         unsafe {
@@ -748,34 +935,14 @@ impl ApplicationHandler for PersistentEditorApp {
             }
             WindowEvent::Focused(focused) => {
                 if let Some(state) = &self.state {
-                    if let Some(plugin_wid) = state.plugin_window_id {
-                        if focused {
-                            let _ = xembed::send_window_activate(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
-                                plugin_wid,
-                            );
-                            let _ = xembed::send_focus_in(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
-                                plugin_wid,
-                            );
-                        } else {
-                            let _ = xembed::send_focus_out(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
-                                plugin_wid,
-                            );
-                            let _ = xembed::send_window_deactivate(
-                                &state.x11_conn,
-                                &state.xembed_atoms,
-                                plugin_wid,
-                            );
-                        }
-                    }
+                    send_focus_change(state, focused);
                 }
             }
-            WindowEvent::Resized(_size) => {}
+            WindowEvent::Resized(size) => {
+                if let Some(state) = &mut self.state {
+                    apply_host_resize(state, size.width.max(1), size.height.max(1));
+                }
+            }
             _ => {}
         }
     }
