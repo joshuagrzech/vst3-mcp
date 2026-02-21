@@ -29,6 +29,9 @@ struct InstallerApp {
     router_base: String,
     install_plugin: bool,
     install_binaries: bool,
+    use_precompiled: bool,
+    precompiled_path: String,
+    use_build_cache: bool,
     enable_router_service: bool,
     configure_agents: bool,
 
@@ -56,6 +59,9 @@ impl InstallerApp {
             router_base,
             install_plugin: true,
             install_binaries: true,
+            use_precompiled: false,
+            precompiled_path: "./target".to_string(),
+            use_build_cache: true,
             enable_router_service: true,
             configure_agents: true,
             ..Default::default()
@@ -98,6 +104,9 @@ impl InstallerApp {
             router_base: self.router_base.clone(),
             install_plugin: self.install_plugin,
             install_binaries: self.install_binaries,
+            use_precompiled: self.use_precompiled,
+            precompiled_path: self.precompiled_path.clone(),
+            use_build_cache: self.use_build_cache,
             enable_router_service: self.enable_router_service,
             configure_agents: self.configure_agents,
         };
@@ -145,6 +154,15 @@ impl eframe::App for InstallerApp {
                 ui.label("Install options");
                 ui.checkbox(&mut self.install_plugin, "Build + install VST3 wrapper plugin");
                 ui.checkbox(&mut self.install_binaries, "Build + install router binaries to ~/.local/bin");
+                ui.checkbox(&mut self.use_build_cache, "Incremental build (reuse dependency cache)");
+                ui.checkbox(&mut self.use_precompiled, "Skip build (use precompiled binaries)");
+                if self.use_precompiled {
+                    ui.horizontal(|ui| {
+                        ui.label("Precompiled target dir:");
+                        ui.text_edit_singleline(&mut self.precompiled_path);
+                    });
+                    ui.small("Should point to the 'target' directory containing 'release/'.");
+                }
                 ui.checkbox(&mut self.enable_router_service, "Enable + start router service (systemd --user on Linux)");
                 ui.checkbox(&mut self.configure_agents, "Configure Claude/Gemini/Cursor MCP settings");
             });
@@ -217,6 +235,9 @@ struct WorkerOpts {
     router_base: String,
     install_plugin: bool,
     install_binaries: bool,
+    use_precompiled: bool,
+    precompiled_path: String,
+    use_build_cache: bool,
     enable_router_service: bool,
     configure_agents: bool,
 }
@@ -237,30 +258,59 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
             return Err("Router base URL is empty".to_string());
         }
 
-        // Always use a fresh, isolated target dir so we build from scratch each run.
-        let temp = TempDir::new().map_err(|e| format!("Failed to create temp dir: {e}"))?;
-        let target_dir = temp.path().join("target");
-        tx.send(WorkerMsg::Log(format!(
-            "Using fresh build dir: {}",
-            target_dir.display()
-        )))
-        .ok();
+        // Use a persistent cache dir, a fresh temp dir, or the precompiled path.
+        let temp = if opts.use_precompiled || opts.use_build_cache {
+            None
+        } else {
+            Some(TempDir::new().map_err(|e| format!("Failed to create temp dir: {e}"))?)
+        };
+
+        let target_dir = if let Some(t) = &temp {
+            t.path().join("target")
+        } else if opts.use_precompiled {
+            expand_tilde(&opts.precompiled_path)
+        } else {
+            // Incremental build mode.
+            expand_tilde("~/.cache/agentaudio/target")
+        };
+
+        if opts.use_precompiled {
+            tx.send(WorkerMsg::Log(format!(
+                "Using existing binaries from {}",
+                target_dir.display()
+            )))
+            .ok();
+        } else if opts.use_build_cache {
+            tx.send(WorkerMsg::Log(format!(
+                "Using build cache (incremental): {}",
+                target_dir.display()
+            )))
+            .ok();
+        } else {
+            tx.send(WorkerMsg::Log(format!(
+                "Using fresh build dir (clean): {}",
+                target_dir.display()
+            )))
+            .ok();
+        }
 
         let local_bin = expand_tilde("~/.local/bin");
         match opts.action {
             WorkerAction::Install => {
                 if opts.install_plugin {
-                    tx.send(WorkerMsg::Log("Building VST3 wrapper…".to_string()))
-                        .ok();
+                    if !opts.use_precompiled {
+                        tx.send(WorkerMsg::Log("Building VST3 wrapper…".to_string()))
+                            .ok();
 
-                    let mut cmd = Command::new("cargo");
-                    cmd.arg("build")
-                        .arg("--release")
-                        .arg("--manifest-path")
-                        .arg("crates/agentaudio-wrapper-vst3/Cargo.toml")
-                        .current_dir(&repo_root)
-                        .env("CARGO_TARGET_DIR", &target_dir);
-                    run_cmd_stream(&tx, cmd)?;
+                        let mut cmd = Command::new("cargo");
+                        cmd.arg("build")
+                            .arg("--release")
+                            .arg("--manifest-path")
+                            .arg("crates/agentaudio-wrapper-vst3/Cargo.toml")
+                            .current_dir(&repo_root)
+                            .env("CARGO_TARGET_DIR", &target_dir);
+                        run_cmd_stream(&tx, cmd)?;
+                    }
 
                     tx.send(WorkerMsg::Log("Bundling + installing VST3 wrapper…".to_string()))
                         .ok();
@@ -270,36 +320,38 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
                         .ok();
                 }
 
-                tx.send(WorkerMsg::Log("Building router + shims…".to_string()))
-                    .ok();
-                let mut cmd = Command::new("cargo");
-                cmd.arg("build")
-                    .arg("--release")
-                    .arg("-p")
-                    .arg("agentaudio-mcp-router")
-                    .arg("--bin")
-                    .arg("agentaudio-mcp-routerd")
-                    .current_dir(&repo_root)
-                    .env("CARGO_TARGET_DIR", &target_dir);
-                run_cmd_stream(&tx, cmd)?;
+                if !opts.use_precompiled {
+                    tx.send(WorkerMsg::Log("Building router + shims…".to_string()))
+                        .ok();
+                    let mut cmd = Command::new("cargo");
+                    cmd.arg("build")
+                        .arg("--release")
+                        .arg("-p")
+                        .arg("agentaudio-mcp-router")
+                        .arg("--bin")
+                        .arg("agentaudio-mcp-routerd")
+                        .current_dir(&repo_root)
+                        .env("CARGO_TARGET_DIR", &target_dir);
+                    run_cmd_stream(&tx, cmd)?;
 
-                let mut cmd = Command::new("cargo");
-                cmd.arg("build")
-                    .arg("--release")
-                    .arg("--bin")
-                    .arg("agentaudio-mcp-stdio")
-                    .current_dir(&repo_root)
-                    .env("CARGO_TARGET_DIR", &target_dir);
-                run_cmd_stream(&tx, cmd)?;
+                    let mut cmd = Command::new("cargo");
+                    cmd.arg("build")
+                        .arg("--release")
+                        .arg("--bin")
+                        .arg("agentaudio-mcp-stdio")
+                        .current_dir(&repo_root)
+                        .env("CARGO_TARGET_DIR", &target_dir);
+                    run_cmd_stream(&tx, cmd)?;
 
-                let mut cmd = Command::new("cargo");
-                cmd.arg("build")
-                    .arg("--release")
-                    .arg("--bin")
-                    .arg("agentaudio-mcp")
-                    .current_dir(&repo_root)
-                    .env("CARGO_TARGET_DIR", &target_dir);
-                run_cmd_stream(&tx, cmd)?;
+                    let mut cmd = Command::new("cargo");
+                    cmd.arg("build")
+                        .arg("--release")
+                        .arg("--bin")
+                        .arg("agentaudio-mcp")
+                        .current_dir(&repo_root)
+                        .env("CARGO_TARGET_DIR", &target_dir);
+                    run_cmd_stream(&tx, cmd)?;
+                }
 
                 if opts.install_binaries {
                     tx.send(WorkerMsg::Log(format!(
@@ -377,7 +429,7 @@ fn run_worker(opts: WorkerOpts, tx: Sender<WorkerMsg>) {
                         .ok();
                     // Build a fresh agentaudio-mcp if needed.
                     let mcp_installed = local_bin.join("agentaudio-mcp").exists();
-                    if !mcp_installed {
+                    if !mcp_installed && !opts.use_precompiled {
                         tx.send(WorkerMsg::Log("Building agentaudio-mcp for uninstall…".to_string()))
                             .ok();
                         let mut cmd = Command::new("cargo");
