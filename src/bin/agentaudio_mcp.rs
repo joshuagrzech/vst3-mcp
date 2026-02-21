@@ -80,11 +80,14 @@ fn parse_args() -> Result<(Action, Config), String> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--name" => {
-                name = args.next().ok_or_else(|| "Missing value for --name".to_string())?;
+                name = args
+                    .next()
+                    .ok_or_else(|| "Missing value for --name".to_string())?;
             }
             "--router" => {
-                router_base =
-                    args.next().ok_or_else(|| "Missing value for --router".to_string())?;
+                router_base = args
+                    .next()
+                    .ok_or_else(|| "Missing value for --router".to_string())?;
             }
             "--help" | "-h" => return Err(usage()),
             other => return Err(format!("Unknown arg '{other}'.\n\n{}", usage())),
@@ -96,13 +99,7 @@ fn parse_args() -> Result<(Action, Config), String> {
         return Err("router base URL is empty".to_string());
     }
 
-    Ok((
-        action,
-        Config {
-            name,
-            router_base,
-        },
-    ))
+    Ok((action, Config { name, router_base }))
 }
 
 fn usage() -> String {
@@ -285,7 +282,8 @@ fn apply_uninstall(target: &Target, cfg: &Config) -> Outcome {
 
 fn load_json(path: &Path) -> io::Result<Value> {
     let bytes = fs::read(path)?;
-    let v: Value = serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let v: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(v)
 }
 
@@ -307,8 +305,8 @@ fn write_json_with_backup(path: &Path, root: &Value) -> io::Result<()> {
     let tmp = tmp_path(path);
     {
         let mut f = fs::File::create(&tmp)?;
-        let bytes = serde_json::to_vec_pretty(root)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let bytes =
+            serde_json::to_vec_pretty(root).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         f.write_all(&bytes)?;
         f.write_all(b"\n")?;
         f.sync_all()?;
@@ -394,4 +392,3 @@ fn desired_entry(kind: TargetKind, cfg: &Config) -> Value {
         }),
     }
 }
-

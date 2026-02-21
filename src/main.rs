@@ -19,9 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("vst3-mcp-host starting");
 
     let host = AudioHost::new();
-    let service = host
-        .serve(rmcp::transport::io::stdio())
-        .await?;
+    let service = host.serve(rmcp::transport::io::stdio()).await?;
 
     service.waiting().await?;
 

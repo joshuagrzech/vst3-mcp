@@ -57,8 +57,9 @@ pub fn save_preset(
     controller_state: Option<&[u8]>,
 ) -> Result<(), HostError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| HostError::PresetError(format!("failed to create preset directory: {}", e)))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            HostError::PresetError(format!("failed to create preset directory: {}", e))
+        })?;
     }
     let file = std::fs::File::create(path)
         .map_err(|e| HostError::PresetError(format!("failed to create preset file: {}", e)))?;
@@ -138,7 +139,8 @@ pub fn save_preset(
         .map_err(|e| HostError::PresetError(format!("flush error: {}", e)))?;
 
     // Patch chunk_list_offset in header
-    let mut file = writer.into_inner()
+    let mut file = writer
+        .into_inner()
         .map_err(|e| HostError::PresetError(format!("flush error: {}", e)))?;
     file.seek(SeekFrom::Start(chunk_list_offset_pos as u64))
         .map_err(|e| HostError::PresetError(format!("seek error: {}", e)))?;
@@ -245,7 +247,10 @@ pub fn load_preset(path: &Path) -> Result<PresetData, HostError> {
         if offset + size > data.len() {
             return Err(HostError::PresetError(format!(
                 "chunk {:?} exceeds file bounds (offset={}, size={}, file_size={})",
-                chunk_id, offset, size, data.len()
+                chunk_id,
+                offset,
+                size,
+                data.len()
             )));
         }
 

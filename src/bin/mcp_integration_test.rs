@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use vst3_mcp_host::hosting::host_app::{ComponentHandler, HostApp};
 use vst3_mcp_host::hosting::module::VstModule;
@@ -36,8 +36,8 @@ struct McpServer {
 impl McpServer {
     fn start() -> Result<Self, String> {
         // Find the MCP server binary
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("Failed to get current exe: {}", e))?;
+        let exe =
+            std::env::current_exe().map_err(|e| format!("Failed to get current exe: {}", e))?;
         let server_binary = exe
             .parent()
             .ok_or("No parent directory")?
@@ -62,14 +62,17 @@ impl McpServer {
         let mut server = Self { process };
 
         // Send initialize request (MCP protocol handshake)
-        server.send_request("initialize", json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "mcp_integration_test",
-                "version": "1.0.0"
-            }
-        }))?;
+        server.send_request(
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "mcp_integration_test",
+                    "version": "1.0.0"
+                }
+            }),
+        )?;
 
         // Send initialized notification
         server.send_notification("notifications/initialized", json!({}))?;
@@ -88,22 +91,14 @@ impl McpServer {
         let request_str = serde_json::to_string(&request)
             .map_err(|e| format!("Failed to serialize request: {}", e))?;
 
-        let stdin = self
-            .process
-            .stdin
-            .as_mut()
-            .ok_or("No stdin available")?;
+        let stdin = self.process.stdin.as_mut().ok_or("No stdin available")?;
         writeln!(stdin, "{}", request_str)
             .map_err(|e| format!("Failed to write to server stdin: {}", e))?;
         stdin
             .flush()
             .map_err(|e| format!("Failed to flush stdin: {}", e))?;
 
-        let stdout = self
-            .process
-            .stdout
-            .as_mut()
-            .ok_or("No stdout available")?;
+        let stdout = self.process.stdout.as_mut().ok_or("No stdout available")?;
         let mut reader = BufReader::new(stdout);
         let mut response_line = String::new();
         reader
@@ -133,11 +128,7 @@ impl McpServer {
         let notification_str = serde_json::to_string(&notification)
             .map_err(|e| format!("Failed to serialize notification: {}", e))?;
 
-        let stdin = self
-            .process
-            .stdin
-            .as_mut()
-            .ok_or("No stdin available")?;
+        let stdin = self.process.stdin.as_mut().ok_or("No stdin available")?;
         writeln!(stdin, "{}", notification_str)
             .map_err(|e| format!("Failed to write notification: {}", e))?;
         stdin
@@ -162,11 +153,7 @@ impl McpServer {
             .map_err(|e| format!("Failed to serialize request: {}", e))?;
 
         // Write request to server stdin
-        let stdin = self
-            .process
-            .stdin
-            .as_mut()
-            .ok_or("No stdin available")?;
+        let stdin = self.process.stdin.as_mut().ok_or("No stdin available")?;
         writeln!(stdin, "{}", request_str)
             .map_err(|e| format!("Failed to write to server stdin: {}", e))?;
         stdin
@@ -174,11 +161,7 @@ impl McpServer {
             .map_err(|e| format!("Failed to flush stdin: {}", e))?;
 
         // Read response from server stdout
-        let stdout = self
-            .process
-            .stdout
-            .as_mut()
-            .ok_or("No stdout available")?;
+        let stdout = self.process.stdout.as_mut().ok_or("No stdout available")?;
         let mut reader = BufReader::new(stdout);
         let mut response_line = String::new();
         reader
@@ -243,11 +226,10 @@ impl Drop for McpServer {
 fn find_test_plugin() -> Option<(String, String)> {
     let custom_path = std::env::var("PLUGIN_PATH").ok();
 
-    let plugins = scanner::scan_plugins(custom_path.as_deref())
-        .unwrap_or_else(|e| {
-            eprintln!("WARNING: Plugin scan failed: {}", e);
-            Vec::new()
-        });
+    let plugins = scanner::scan_plugins(custom_path.as_deref()).unwrap_or_else(|e| {
+        eprintln!("WARNING: Plugin scan failed: {}", e);
+        Vec::new()
+    });
 
     if plugins.is_empty() {
         eprintln!("WARNING: No VST3 plugins found. Set PLUGIN_PATH or install plugins.");
@@ -300,7 +282,8 @@ fn load_plugin_direct(uid: &str) -> Option<(PluginInstance, String)> {
     let host_app = HostApp::new();
     let handler = ComponentHandler::new();
 
-    let mut instance = PluginInstance::from_factory(Arc::clone(&module), &class_id, host_app, handler).ok()?;
+    let mut instance =
+        PluginInstance::from_factory(Arc::clone(&module), &class_id, host_app, handler).ok()?;
 
     // Verify audio I/O
     let buses = instance.get_bus_info();
@@ -347,9 +330,7 @@ fn process_with_plugin(plugin: &mut PluginInstance, input: &[&[f32]]) -> Vec<Vec
     let channels = input.len();
     let frames = if channels > 0 { input[0].len() } else { 0 };
 
-    let mut output_planar: Vec<Vec<f32>> = (0..channels)
-        .map(|_| vec![0.0f32; frames])
-        .collect();
+    let mut output_planar: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; frames]).collect();
 
     let input_slices: Vec<&[f32]> = input.iter().map(|ch| &ch[..]).collect();
     let mut output_slices: Vec<&mut [f32]> = output_planar
@@ -453,7 +434,10 @@ fn test_list_params(server: &mut McpServer) -> Result<Value, String> {
         .ok_or("Missing display field in parameter")?;
 
     eprintln!("  Found {} writable parameters", count);
-    eprintln!("  First param: id={}, name='{}', value={}, display='{}'", id, name, value, display);
+    eprintln!(
+        "  First param: id={}, name='{}', value={}, display='{}'",
+        id, name, value, display
+    );
     eprintln!("✓ Test 3: list_params returns writable parameters");
 
     Ok(result)
@@ -499,8 +483,8 @@ fn test_set_param_audible(
     eprintln!("\n--- Test 5: set_param produces audible change ---");
 
     // Load plugin directly for processing
-    let (mut plugin, plugin_name) = load_plugin_direct(plugin_uid)
-        .ok_or("Failed to load plugin for audio processing")?;
+    let (mut plugin, plugin_name) =
+        load_plugin_direct(plugin_uid).ok_or("Failed to load plugin for audio processing")?;
 
     // Generate test audio
     let test_audio = generate_test_audio();
@@ -510,10 +494,7 @@ fn test_set_param_audible(
     let baseline = process_with_plugin(&mut plugin, &input_slices);
 
     // Queue parameter change via MCP
-    let result = server.call_tool(
-        "set_param",
-        json!({ "id": param_id, "value": 0.75 }),
-    )?;
+    let result = server.call_tool("set_param", json!({ "id": param_id, "value": 0.75 }))?;
 
     let status = result
         .get("status")
@@ -611,8 +592,8 @@ fn test_batch_set(
     }
 
     // Verify audible change (any difference from baseline)
-    let (mut plugin, _) = load_plugin_direct(plugin_uid)
-        .ok_or("Failed to load plugin for batch test")?;
+    let (mut plugin, _) =
+        load_plugin_direct(plugin_uid).ok_or("Failed to load plugin for batch test")?;
 
     let test_audio = generate_test_audio();
     let input_slices: Vec<&[f32]> = test_audio.iter().map(|ch| ch.as_slice()).collect();
@@ -676,7 +657,10 @@ fn run_tests() -> Result<(), String> {
         "load_plugin",
         json!({ "uid": plugin_uid, "sample_rate": 44100 }),
     )?;
-    eprintln!("  Plugin loaded: {}", load_result.get("name").unwrap_or(&json!("unknown")));
+    eprintln!(
+        "  Plugin loaded: {}",
+        load_result.get("name").unwrap_or(&json!("unknown"))
+    );
 
     // Test 2: get_plugin_info
     test_get_plugin_info(&mut server)?;

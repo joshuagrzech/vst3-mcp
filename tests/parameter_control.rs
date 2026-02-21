@@ -29,11 +29,10 @@ fn load_test_plugin() -> Option<(PluginInstance, String)> {
     // Check for PLUGIN_PATH env var override
     let custom_path = std::env::var("PLUGIN_PATH").ok();
 
-    let plugins = scanner::scan_plugins(custom_path.as_deref())
-        .unwrap_or_else(|e| {
-            eprintln!("WARNING: Plugin scan failed: {}", e);
-            Vec::new()
-        });
+    let plugins = scanner::scan_plugins(custom_path.as_deref()).unwrap_or_else(|e| {
+        eprintln!("WARNING: Plugin scan failed: {}", e);
+        Vec::new()
+    });
 
     if plugins.is_empty() {
         eprintln!("WARNING: No VST3 plugins found. Skipping integration test.");
@@ -55,7 +54,12 @@ fn load_test_plugin() -> Option<(PluginInstance, String)> {
 
     // Try each plugin until we find one that loads and has audio I/O
     for info in &sorted_plugins {
-        eprintln!("INFO: Trying plugin '{}' ({}) from {}", info.name, info.uid, info.path.display());
+        eprintln!(
+            "INFO: Trying plugin '{}' ({}) from {}",
+            info.name,
+            info.uid,
+            info.path.display()
+        );
 
         let module = match VstModule::load(&info.path) {
             Ok(m) => Arc::new(m),
@@ -76,22 +80,23 @@ fn load_test_plugin() -> Option<(PluginInstance, String)> {
         let host_app = HostApp::new();
         let handler = ComponentHandler::new();
 
-        let mut instance = match PluginInstance::from_factory(Arc::clone(&module), &class_id, host_app, handler) {
-            Ok(i) => i,
-            Err(e) => {
-                eprintln!("  SKIP: Failed to create instance: {}", e);
-                continue;
-            }
-        };
+        let mut instance =
+            match PluginInstance::from_factory(Arc::clone(&module), &class_id, host_app, handler) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("  SKIP: Failed to create instance: {}", e);
+                    continue;
+                }
+            };
 
         // Verify it has audio I/O buses (effect plugin)
         let buses = instance.get_bus_info();
-        let has_audio_input = buses.iter().any(|b| {
-            b.bus_type == BusType::Audio && b.direction == BusDirection::Input
-        });
-        let has_audio_output = buses.iter().any(|b| {
-            b.bus_type == BusType::Audio && b.direction == BusDirection::Output
-        });
+        let has_audio_input = buses
+            .iter()
+            .any(|b| b.bus_type == BusType::Audio && b.direction == BusDirection::Input);
+        let has_audio_output = buses
+            .iter()
+            .any(|b| b.bus_type == BusType::Audio && b.direction == BusDirection::Output);
 
         if !has_audio_input || !has_audio_output {
             eprintln!(
@@ -158,9 +163,7 @@ fn process_with_plugin(plugin: &mut PluginInstance, input: &[&[f32]]) -> Vec<Vec
     let frames = if channels > 0 { input[0].len() } else { 0 };
 
     // Allocate output buffers
-    let mut output_planar: Vec<Vec<f32>> = (0..channels)
-        .map(|_| vec![0.0f32; frames])
-        .collect();
+    let mut output_planar: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0f32; frames]).collect();
 
     // Build per-channel input slices
     let input_slices: Vec<&[f32]> = input.iter().map(|ch| &ch[..]).collect();
@@ -172,7 +175,8 @@ fn process_with_plugin(plugin: &mut PluginInstance, input: &[&[f32]]) -> Vec<Vec
         .collect();
 
     // Process the block
-    plugin.process(&input_slices, &mut output_slices, frames as i32)
+    plugin
+        .process(&input_slices, &mut output_slices, frames as i32)
         .expect("plugin process should succeed");
 
     output_planar
@@ -212,18 +216,30 @@ fn test_enumerate_parameters() {
     };
 
     let param_count = plugin.get_parameter_count();
-    assert!(param_count > 0, "Plugin should expose at least one parameter");
+    assert!(
+        param_count > 0,
+        "Plugin should expose at least one parameter"
+    );
 
     // Enumerate all parameters and validate structure
     for i in 0..param_count {
-        let info = plugin.get_parameter_info(i).expect("getParameterInfo should succeed");
-        assert!(!info.title.is_empty(), "Parameter {} should have non-empty title", i);
+        let info = plugin
+            .get_parameter_info(i)
+            .expect("getParameterInfo should succeed");
+        assert!(
+            !info.title.is_empty(),
+            "Parameter {} should have non-empty title",
+            i
+        );
         // Validate id, flags exist (no crashes)
         let _ = info.id;
         let _ = info.flags;
     }
 
-    eprintln!("[PASS] Enumerated {} parameters from {}", param_count, plugin_name);
+    eprintln!(
+        "[PASS] Enumerated {} parameters from {}",
+        param_count, plugin_name
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -244,14 +260,24 @@ fn test_read_parameter_with_display() {
     }
 
     // Read first parameter
-    let info = plugin.get_parameter_info(0).expect("getParameterInfo should succeed");
+    let info = plugin
+        .get_parameter_info(0)
+        .expect("getParameterInfo should succeed");
     let normalized = plugin.get_parameter(info.id);
-    assert!(normalized >= 0.0 && normalized <= 1.0, "Normalized value should be in [0,1]");
+    assert!(
+        normalized >= 0.0 && normalized <= 1.0,
+        "Normalized value should be in [0,1]"
+    );
 
-    let display = plugin.get_parameter_display(info.id).expect("get_parameter_display should succeed");
+    let display = plugin
+        .get_parameter_display(info.id)
+        .expect("get_parameter_display should succeed");
     assert!(!display.is_empty(), "Display string should not be empty");
 
-    eprintln!("[PASS] Read param '{}' = {} ({})", info.title, normalized, display);
+    eprintln!(
+        "[PASS] Read param '{}' = {} ({})",
+        info.title, normalized, display
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -296,10 +322,16 @@ fn test_write_parameter_audible() {
 
     // Verify outputs are different (parameter change had audible effect)
     let diff = max_abs_diff(&output_default[0], &output_modified[0]);
-    assert!(diff > 0.001, "Parameter change should produce audible difference (diff: {})", diff);
+    assert!(
+        diff > 0.001,
+        "Parameter change should produce audible difference (diff: {})",
+        diff
+    );
 
-    eprintln!("[PASS] Parameter '{}' change {} -> {} produced audible effect (max diff: {:.4})",
-              param_info.title, default_val, new_val, diff);
+    eprintln!(
+        "[PASS] Parameter '{}' change {} -> {} produced audible effect (max diff: {:.4})",
+        param_info.title, default_val, new_val, diff
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -318,19 +350,29 @@ fn test_readonly_parameters_filtered() {
     let mut writable_count = 0;
 
     for i in 0..param_count {
-        let info = plugin.get_parameter_info(i).expect("getParameterInfo should succeed");
+        let info = plugin
+            .get_parameter_info(i)
+            .expect("getParameterInfo should succeed");
         if info.is_read_only() {
             readonly_count += 1;
-            assert!(!info.is_writable(), "Read-only param should not be writable");
+            assert!(
+                !info.is_writable(),
+                "Read-only param should not be writable"
+            );
         }
         if info.is_writable() {
             writable_count += 1;
-            assert!(!info.is_read_only(), "Writable param should not be read-only");
+            assert!(
+                !info.is_read_only(),
+                "Writable param should not be read-only"
+            );
         }
     }
 
-    eprintln!("[PASS] Filtered {} readonly, {} writable from {} total parameters",
-              readonly_count, writable_count, param_count);
+    eprintln!(
+        "[PASS] Filtered {} readonly, {} writable from {} total parameters",
+        readonly_count, writable_count, param_count
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -376,5 +418,8 @@ fn test_parameter_sweep_smooth() {
     // Verify no crash and processing succeeded
     // Note: Detailed zipper noise detection requires FFT/spectral analysis (out of scope for MVP)
     // This test validates that sweeps don't crash and produce valid output
-    eprintln!("[PASS] Parameter sweep of '{}' completed {} steps without crash", param_info.title, sweep_steps);
+    eprintln!(
+        "[PASS] Parameter sweep of '{}' completed {} steps without crash",
+        param_info.title, sweep_steps
+    );
 }

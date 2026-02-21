@@ -6,14 +6,14 @@
 use std::ffi::c_void;
 
 use tracing::debug;
-use vst3::com_scrape_types::{Class, ComWrapper};
 use vst3::Steinberg::Vst::{
-    IComponentHandler, IComponentHandlerTrait, IHostApplication, IHostApplicationTrait,
-    ParamID, ParamValue, String128,
+    IComponentHandler, IComponentHandlerTrait, IHostApplication, IHostApplicationTrait, ParamID,
+    ParamValue, String128,
 };
 use vst3::Steinberg::{
-    kNotImplemented, kResultOk, tresult, FUnknown, IPluginBase, IPluginBaseTrait, TUID,
+    FUnknown, IPluginBase, IPluginBaseTrait, TUID, kNotImplemented, kResultOk, tresult,
 };
+use vst3::com_scrape_types::{Class, ComWrapper};
 
 /// Host application identity, implementing IHostApplication.
 ///

@@ -99,7 +99,9 @@ fn print_help() {
     println!("  agent-audio-integration-test --path ~/.vst3");
     println!();
     println!("  # Test a specific plugin with 20 teardown cycles");
-    println!("  agent-audio-integration-test --class-id AABBCCDD11223344AABBCCDD11223344 --path /path/to/Plugin.vst3 --cycles 20");
+    println!(
+        "  agent-audio-integration-test --class-id AABBCCDD11223344AABBCCDD11223344 --path /path/to/Plugin.vst3 --cycles 20"
+    );
 }
 
 // ---- Result tracking ----
@@ -166,14 +168,22 @@ fn phase_a_discovery(scan_path: Option<&str>) -> (Vec<PluginInfo>, Vec<TestResul
         Ok(p) => p,
         Err(e) => {
             println!("  FAIL  Scanner returned error: {}", e);
-            results.push(TestResult::fail("A", "scanner", &format!("scan error: {}", e)));
+            results.push(TestResult::fail(
+                "A",
+                "scanner",
+                &format!("scan error: {}", e),
+            ));
             return (Vec::new(), results);
         }
     };
 
     if plugins.is_empty() {
         println!("  FAIL  No plugins discovered");
-        results.push(TestResult::fail("A", "scanner", "no plugins found in scan paths"));
+        results.push(TestResult::fail(
+            "A",
+            "scanner",
+            "no plugins found in scan paths",
+        ));
         return (plugins, results);
     }
 
@@ -182,7 +192,10 @@ fn phase_a_discovery(scan_path: Option<&str>) -> (Vec<PluginInfo>, Vec<TestResul
     for (i, p) in plugins.iter().enumerate() {
         println!(
             "    [{}] {} by {} ({})",
-            i + 1, p.name, p.vendor, p.category
+            i + 1,
+            p.name,
+            p.vendor,
+            p.category
         );
         println!("        classId: {}", p.uid);
         println!("        path:    {}", p.path.display());
@@ -212,7 +225,11 @@ fn phase_b_loading(plugin: &PluginInfo) -> (Option<(PluginInstance, Arc<VstModul
             println!("    FAIL  Invalid classId hex: {}", plugin.uid);
             return (
                 None,
-                TestResult::fail("B", &plugin.name, &format!("invalid classId: {}", plugin.uid)),
+                TestResult::fail(
+                    "B",
+                    &plugin.name,
+                    &format!("invalid classId: {}", plugin.uid),
+                ),
             );
         }
     };
@@ -355,7 +372,11 @@ fn phase_c_lifecycle(instance: &mut PluginInstance, name: &str) -> TestResult {
     // Print bus info and parameter count
     let buses = instance.get_bus_info();
     let param_count = instance.get_parameter_count();
-    println!("    [8/8] Bus info: {} bus(es), {} parameter(s)", buses.len(), param_count);
+    println!(
+        "    [8/8] Bus info: {} bus(es), {} parameter(s)",
+        buses.len(),
+        param_count
+    );
     for bus in &buses {
         println!(
             "          {:?} {:?} \"{}\" ({} ch, default_active={})",
@@ -467,11 +488,7 @@ fn phase_d_teardown(plugin: &PluginInfo, cycles: usize) -> TestResult {
     }
 
     println!("    PASS  {} load/unload cycles completed cleanly", cycles);
-    TestResult::pass(
-        "D",
-        &plugin.name,
-        &format!("{} cycles completed", cycles),
-    )
+    TestResult::pass("D", &plugin.name, &format!("{} cycles completed", cycles))
 }
 
 // ---- Phase E: Unified vs Split Detection ----
@@ -528,7 +545,10 @@ fn main() {
         let tuid = match hex_string_to_tuid(class_id_hex) {
             Some(t) => t,
             None => {
-                eprintln!("ERROR: Invalid class ID hex string (expected 32 hex chars): {}", class_id_hex);
+                eprintln!(
+                    "ERROR: Invalid class ID hex string (expected 32 hex chars): {}",
+                    class_id_hex
+                );
                 std::process::exit(1);
             }
         };
@@ -598,7 +618,11 @@ fn main() {
         all_results.push(phase_d_teardown(&plugin, args.cycles));
 
         print_summary(&all_results, unified_count, split_count);
-        let exit_code = if all_results.iter().all(|r| r.passed) { 0 } else { 1 };
+        let exit_code = if all_results.iter().all(|r| r.passed) {
+            0
+        } else {
+            1
+        };
         std::process::exit(exit_code);
     }
 
@@ -661,7 +685,11 @@ fn main() {
     }
 
     print_summary(&all_results, unified_count, split_count);
-    let exit_code = if all_results.iter().all(|r| r.passed) { 0 } else { 1 };
+    let exit_code = if all_results.iter().all(|r| r.passed) {
+        0
+    } else {
+        1
+    };
     std::process::exit(exit_code);
 }
 
@@ -685,7 +713,10 @@ fn print_summary(results: &[TestResult], unified_count: usize, split_count: usiz
     }
 
     println!();
-    println!("  Architecture Summary: {} unified, {} split", unified_count, split_count);
+    println!(
+        "  Architecture Summary: {} unified, {} split",
+        unified_count, split_count
+    );
     println!();
     println!("  Total: {}/{} passed, {} failed", passed, total, failed);
 

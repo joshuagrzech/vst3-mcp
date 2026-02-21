@@ -9,8 +9,8 @@ use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 
 use libloading::{Library, Symbol};
-use vst3::com_scrape_types::ComPtr;
 use vst3::Steinberg::IPluginFactory;
+use vst3::com_scrape_types::ComPtr;
 
 use super::types::HostError;
 
@@ -74,7 +74,11 @@ impl VstModule {
             // The factory pointer is returned with a reference count already incremented,
             // so we take ownership via from_raw.
             ComPtr::<IPluginFactory>::from_raw(raw_factory as *mut IPluginFactory).ok_or_else(
-                || HostError::ModuleLoadFailed("GetPluginFactory returned null pointer".to_string()),
+                || {
+                    HostError::ModuleLoadFailed(
+                        "GetPluginFactory returned null pointer".to_string(),
+                    )
+                },
             )?
         };
 
@@ -113,10 +117,7 @@ fn find_library_path(bundle_path: &Path) -> Result<PathBuf, HostError> {
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| {
-            HostError::ModuleLoadFailed(format!(
-                "invalid bundle path: {}",
-                bundle_path.display()
-            ))
+            HostError::ModuleLoadFailed(format!("invalid bundle path: {}", bundle_path.display()))
         })?;
 
     #[cfg(target_os = "linux")]
@@ -147,10 +148,7 @@ fn find_library_path(bundle_path: &Path) -> Result<PathBuf, HostError> {
 
     #[cfg(target_os = "macos")]
     {
-        let lib_path = bundle_path
-            .join("Contents")
-            .join("MacOS")
-            .join(bundle_name);
+        let lib_path = bundle_path.join("Contents").join("MacOS").join(bundle_name);
 
         if lib_path.exists() {
             Ok(lib_path)

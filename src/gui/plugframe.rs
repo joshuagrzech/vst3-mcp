@@ -12,11 +12,9 @@
 use std::sync::{Arc, Mutex};
 
 use tracing::debug;
-use vst3::com_scrape_types::ComWrapper;
 use vst3::Steinberg::Linux::IRunLoop;
-use vst3::Steinberg::{
-    kResultOk, tresult, IPlugFrame, IPlugFrameTrait, IPlugView, ViewRect,
-};
+use vst3::Steinberg::{IPlugFrame, IPlugFrameTrait, IPlugView, ViewRect, kResultOk, tresult};
+use vst3::com_scrape_types::ComWrapper;
 
 use super::runloop::HostRunLoop;
 
@@ -43,10 +41,7 @@ impl PlugFrame {
     /// `pending_resize` is shared with the event loop so that resizeView
     /// can signal a resize request without directly touching the window
     /// or the IPlugView (avoiding feedback loops).
-    pub fn new(
-        runloop: Arc<HostRunLoop>,
-        pending_resize: PendingResize,
-    ) -> ComWrapper<Self> {
+    pub fn new(runloop: Arc<HostRunLoop>, pending_resize: PendingResize) -> ComWrapper<Self> {
         ComWrapper::new(PlugFrame {
             _runloop_ref: runloop,
             pending_resize,
@@ -59,11 +54,7 @@ impl vst3::Class for PlugFrame {
 }
 
 impl IPlugFrameTrait for PlugFrame {
-    unsafe fn resizeView(
-        &self,
-        _view: *mut IPlugView,
-        new_size: *mut ViewRect,
-    ) -> tresult {
+    unsafe fn resizeView(&self, _view: *mut IPlugView, new_size: *mut ViewRect) -> tresult {
         if new_size.is_null() {
             return kResultOk;
         }

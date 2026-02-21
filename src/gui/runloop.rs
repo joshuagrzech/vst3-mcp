@@ -15,11 +15,11 @@ use std::os::unix::io::RawFd;
 type RawFd = i32;
 
 use tracing::debug;
-use vst3::com_scrape_types::Unknown;
 use vst3::Steinberg::Linux::{
     FileDescriptor, IEventHandler, IRunLoop, IRunLoopTrait, ITimerHandler, TimerInterval,
 };
 use vst3::Steinberg::{FUnknown, kResultOk, tresult};
+use vst3::com_scrape_types::Unknown;
 
 /// A registered timer entry with handler, interval, and last fire time.
 struct TimerEntry {
@@ -123,15 +123,15 @@ impl IRunLoopTrait for HostRunLoop {
         // AddRef the handler to keep it alive while registered
         unsafe { FUnknown::add_ref(handler as *mut FUnknown) };
 
-        self.event_handlers.lock().unwrap().insert(fd as RawFd, handler);
+        self.event_handlers
+            .lock()
+            .unwrap()
+            .insert(fd as RawFd, handler);
         debug!("IRunLoop: registered event handler for FD {}", fd);
         kResultOk
     }
 
-    unsafe fn unregisterEventHandler(
-        &self,
-        handler: *mut IEventHandler,
-    ) -> tresult {
+    unsafe fn unregisterEventHandler(&self, handler: *mut IEventHandler) -> tresult {
         let mut handlers = self.event_handlers.lock().unwrap();
         let removed: Vec<RawFd> = handlers
             .iter()
@@ -177,10 +177,7 @@ impl IRunLoopTrait for HostRunLoop {
         kResultOk
     }
 
-    unsafe fn unregisterTimer(
-        &self,
-        handler: *mut ITimerHandler,
-    ) -> tresult {
+    unsafe fn unregisterTimer(&self, handler: *mut ITimerHandler) -> tresult {
         let mut timers = self.timers.lock().unwrap();
         let original_len = timers.len();
         timers.retain(|entry| !std::ptr::eq(entry.handler, handler));

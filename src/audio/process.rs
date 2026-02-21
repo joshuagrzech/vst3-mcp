@@ -125,9 +125,8 @@ pub fn render_offline(plugin: &mut PluginInstance, decoded: &DecodedAudio) -> Re
                 let output_offset = total_frames + tail_offset;
 
                 // Build per-channel silence input slices
-                let input_slices: Vec<&[f32]> = (0..channels)
-                    .map(|_| &silence[..block_size])
-                    .collect();
+                let input_slices: Vec<&[f32]> =
+                    (0..channels).map(|_| &silence[..block_size]).collect();
 
                 // Build per-channel output slices into the tail region
                 let mut output_vecs: Vec<&mut [f32]> = output_planar
@@ -138,7 +137,10 @@ pub fn render_offline(plugin: &mut PluginInstance, decoded: &DecodedAudio) -> Re
                 plugin
                     .process(&input_slices, &mut output_vecs, block_size as i32)
                     .with_context(|| {
-                        format!("plugin process failed during tail at offset {}", tail_offset)
+                        format!(
+                            "plugin process failed during tail at offset {}",
+                            tail_offset
+                        )
                     })?;
 
                 tail_offset += block_size;
@@ -150,7 +152,9 @@ pub fn render_offline(plugin: &mut PluginInstance, decoded: &DecodedAudio) -> Re
 
     // Restore MXCSR before propagating any error
     #[cfg(target_arch = "x86_64")]
-    unsafe { restore_mxcsr(old_mxcsr); }
+    unsafe {
+        restore_mxcsr(old_mxcsr);
+    }
 
     result?;
 

@@ -324,8 +324,9 @@ fn create_editor_state(
 
     // Resolve the native window handle to a VST3 embedding platform.
     let platform = detect_editor_platform(&window)?;
-    let supported =
-        unsafe { plug_view.isPlatformTypeSupported(platform.platform_type().as_ptr() as *const i8) };
+    let supported = unsafe {
+        plug_view.isPlatformTypeSupported(platform.platform_type().as_ptr() as *const i8)
+    };
     if supported != kResultOk {
         return Err(format!(
             "Plugin doesn't support {} (returned {})",
@@ -422,12 +423,16 @@ fn detect_editor_platform(window: &Window) -> Result<EditorPlatform, String> {
         .map_err(|e| format!("Failed to get window handle: {}", e))?;
 
     match handle.as_raw() {
-        raw_window_handle::RawWindowHandle::Xlib(xlib) => Ok(EditorPlatform::X11(xlib.window as u32)),
+        raw_window_handle::RawWindowHandle::Xlib(xlib) => {
+            Ok(EditorPlatform::X11(xlib.window as u32))
+        }
         raw_window_handle::RawWindowHandle::Xcb(xcb) => Ok(EditorPlatform::X11(xcb.window.get())),
         raw_window_handle::RawWindowHandle::Win32(win32) => {
             #[cfg(target_os = "windows")]
             {
-                Ok(EditorPlatform::Hwnd(win32.hwnd.get() as usize as *mut c_void))
+                Ok(EditorPlatform::Hwnd(
+                    win32.hwnd.get() as usize as *mut c_void
+                ))
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -614,7 +619,11 @@ fn notify_plugin_size(state: &mut EditorState, w: u32, h: u32) {
         if let Some(child) = x11.plugin_window_id {
             if let Ok(cookie) = x11.conn.configure_window(
                 child,
-                &ConfigureWindowAux::new().x(0).y(0).width(size_w).height(size_h),
+                &ConfigureWindowAux::new()
+                    .x(0)
+                    .y(0)
+                    .width(size_w)
+                    .height(size_h),
             ) {
                 let _ = cookie.check();
             }
@@ -692,7 +701,8 @@ fn poll_x11_events(state: &mut EditorState) {
                                 }
 
                                 // Send window activate and focus
-                                let _ = xembed::send_window_activate(&x11.conn, &x11.atoms, child_id);
+                                let _ =
+                                    xembed::send_window_activate(&x11.conn, &x11.atoms, child_id);
                                 let _ = xembed::send_focus_in(&x11.conn, &x11.atoms, child_id);
 
                                 x11._xembed_complete = true;

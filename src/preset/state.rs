@@ -5,14 +5,14 @@
 
 use std::path::Path;
 
-use vst3::Steinberg::kResultOk;
 use vst3::Steinberg::IBStream;
 use vst3::Steinberg::Vst::IComponentTrait;
 use vst3::Steinberg::Vst::IEditControllerTrait;
+use vst3::Steinberg::kResultOk;
 
+use super::vstpreset;
 use crate::hosting::plugin::{PluginInstance, VecStream};
 use crate::hosting::types::HostError;
-use super::vstpreset;
 
 /// Save the current state of a plugin instance to a .vstpreset file.
 ///
@@ -61,12 +61,7 @@ pub fn save_plugin_state(plugin: &PluginInstance, path: &Path) -> Result<(), Hos
 
     let comp_data = comp_stream.data().to_vec();
 
-    vstpreset::save_preset(
-        path,
-        &class_id,
-        &comp_data,
-        ctrl_data.as_deref(),
-    )
+    vstpreset::save_preset(path, &class_id, &comp_data, ctrl_data.as_deref())
 }
 
 /// Restore plugin state from a .vstpreset file.
@@ -156,9 +151,24 @@ mod tests {
 
     #[test]
     fn test_tuid_to_ascii_hex() {
-        let tuid: [i8; 16] = [0x01, 0x23, 0x45, 0x67, 0x89u8 as i8, 0xABu8 as i8,
-                               0xCDu8 as i8, 0xEFu8 as i8, 0x00, 0x11, 0x22, 0x33,
-                               0x44, 0x55, 0x66, 0x77];
+        let tuid: [i8; 16] = [
+            0x01,
+            0x23,
+            0x45,
+            0x67,
+            0x89u8 as i8,
+            0xABu8 as i8,
+            0xCDu8 as i8,
+            0xEFu8 as i8,
+            0x00,
+            0x11,
+            0x22,
+            0x33,
+            0x44,
+            0x55,
+            0x66,
+            0x77,
+        ];
         let hex = tuid_to_ascii_hex(&tuid);
         assert_eq!(&hex, b"0123456789ABCDEF0011223344556677");
     }

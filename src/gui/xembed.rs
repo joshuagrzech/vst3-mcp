@@ -85,15 +85,7 @@ pub fn send_window_activate(
     atoms: &XEmbedAtoms,
     plugin_window: Window,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    send_xembed_message(
-        conn,
-        atoms,
-        plugin_window,
-        XEMBED_WINDOW_ACTIVATE,
-        0,
-        0,
-        0,
-    )
+    send_xembed_message(conn, atoms, plugin_window, XEMBED_WINDOW_ACTIVATE, 0, 0, 0)
 }
 
 /// Send XEMBED_WINDOW_DEACTIVATE to the plugin's child window.
@@ -136,13 +128,5 @@ pub fn send_focus_out(
     atoms: &XEmbedAtoms,
     plugin_window: Window,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    send_xembed_message(
-        conn,
-        atoms,
-        plugin_window,
-        XEMBED_FOCUS_OUT,
-        0,
-        0,
-        0,
-    )
+    send_xembed_message(conn, atoms, plugin_window, XEMBED_FOCUS_OUT, 0, 0, 0)
 }

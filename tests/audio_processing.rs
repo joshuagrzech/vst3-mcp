@@ -150,11 +150,10 @@ fn load_test_plugin(sample_rate: u32) -> Option<TestPlugin> {
     // Check for PLUGIN_PATH env var override
     let custom_path = std::env::var("PLUGIN_PATH").ok();
 
-    let plugins = scanner::scan_plugins(custom_path.as_deref())
-        .unwrap_or_else(|e| {
-            eprintln!("WARNING: Plugin scan failed: {}", e);
-            Vec::new()
-        });
+    let plugins = scanner::scan_plugins(custom_path.as_deref()).unwrap_or_else(|e| {
+        eprintln!("WARNING: Plugin scan failed: {}", e);
+        Vec::new()
+    });
 
     if plugins.is_empty() {
         eprintln!("WARNING: No VST3 plugins found. Skipping integration test.");
@@ -176,7 +175,12 @@ fn load_test_plugin(sample_rate: u32) -> Option<TestPlugin> {
 
     // Try each plugin until we find one that loads and has audio I/O
     for info in &sorted_plugins {
-        eprintln!("INFO: Trying plugin '{}' ({}) from {}", info.name, info.uid, info.path.display());
+        eprintln!(
+            "INFO: Trying plugin '{}' ({}) from {}",
+            info.name,
+            info.uid,
+            info.path.display()
+        );
 
         let module = match VstModule::load(&info.path) {
             Ok(m) => Arc::new(m),
@@ -197,22 +201,23 @@ fn load_test_plugin(sample_rate: u32) -> Option<TestPlugin> {
         let host_app = HostApp::new();
         let handler = ComponentHandler::new();
 
-        let mut instance = match PluginInstance::from_factory(Arc::clone(&module), &class_id, host_app, handler) {
-            Ok(i) => i,
-            Err(e) => {
-                eprintln!("  SKIP: Failed to create instance: {}", e);
-                continue;
-            }
-        };
+        let mut instance =
+            match PluginInstance::from_factory(Arc::clone(&module), &class_id, host_app, handler) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("  SKIP: Failed to create instance: {}", e);
+                    continue;
+                }
+            };
 
         // Verify it has audio I/O buses (effect plugin)
         let buses = instance.get_bus_info();
-        let has_audio_input = buses.iter().any(|b| {
-            b.bus_type == BusType::Audio && b.direction == BusDirection::Input
-        });
-        let has_audio_output = buses.iter().any(|b| {
-            b.bus_type == BusType::Audio && b.direction == BusDirection::Output
-        });
+        let has_audio_input = buses
+            .iter()
+            .any(|b| b.bus_type == BusType::Audio && b.direction == BusDirection::Input);
+        let has_audio_output = buses
+            .iter()
+            .any(|b| b.bus_type == BusType::Audio && b.direction == BusDirection::Output);
 
         if !has_audio_input || !has_audio_output {
             eprintln!(
@@ -294,8 +299,7 @@ fn test_process_wav_through_plugin() {
     generate_stereo_wav(&input_path, 44100, 2.0);
 
     // Process through plugin
-    process_file(&mut tp.instance, &input_path, &output_path)
-        .expect("processing should succeed");
+    process_file(&mut tp.instance, &input_path, &output_path).expect("processing should succeed");
 
     // Verify output file exists
     assert!(output_path.exists(), "output WAV file must exist");
@@ -404,10 +408,10 @@ fn test_bypass_produces_near_identical() {
     process_file(&mut tp2.instance, &signal_input, &signal_output)
         .expect("signal processing should succeed");
 
-    let input_decoded = audio::decode::decode_audio_file(&signal_input)
-        .expect("input must be valid");
-    let output_decoded = audio::decode::decode_audio_file(&signal_output)
-        .expect("output must be valid");
+    let input_decoded =
+        audio::decode::decode_audio_file(&signal_input).expect("input must be valid");
+    let output_decoded =
+        audio::decode::decode_audio_file(&signal_output).expect("output must be valid");
 
     let input_rms = rms(&input_decoded.samples);
     let output_rms = rms(&output_decoded.samples);
@@ -431,10 +435,11 @@ fn test_bypass_produces_near_identical() {
     // buffer has energy (delay shifted the signal).
     let rms_ratio = output_rms / input_rms.max(1e-10);
     assert!(
-        rms_ratio > 0.1 && rms_ratio < 10.0
-            || output_rms > 0.01,  // delay-type: signal present but time-shifted
+        rms_ratio > 0.1 && rms_ratio < 10.0 || output_rms > 0.01, // delay-type: signal present but time-shifted
         "output should contain meaningful audio (input_rms={:.4}, output_rms={:.4}, ratio={:.4})",
-        input_rms, output_rms, rms_ratio
+        input_rms,
+        output_rms,
+        rms_ratio
     );
 
     // Cleanup
@@ -467,10 +472,9 @@ fn test_stereo_channels_preserved() {
     process_file(&mut tp.instance, &input_path, &output_path)
         .expect("stereo processing should succeed");
 
-    let input_decoded = audio::decode::decode_audio_file(&input_path)
-        .expect("input must be valid");
-    let output_decoded = audio::decode::decode_audio_file(&output_path)
-        .expect("output must be valid");
+    let input_decoded = audio::decode::decode_audio_file(&input_path).expect("input must be valid");
+    let output_decoded =
+        audio::decode::decode_audio_file(&output_path).expect("output must be valid");
 
     // Verify output has 2 channels (no mono collapse)
     assert_eq!(
@@ -595,8 +599,8 @@ fn test_no_buffer_boundary_artifacts() {
     process_file(&mut tp.instance, &input_path, &output_path)
         .expect("long file processing should succeed");
 
-    let output_decoded = audio::decode::decode_audio_file(&output_path)
-        .expect("output must be valid WAV");
+    let output_decoded =
+        audio::decode::decode_audio_file(&output_path).expect("output must be valid WAV");
 
     // Deinterleave and check each channel for discontinuities
     let channels = deinterleave(&output_decoded.samples, output_decoded.channels);

@@ -6,13 +6,13 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use tracing::{debug, warn};
-use vst3::Steinberg::kResultOk;
 use vst3::Steinberg::IPluginFactory2;
-use vst3::Steinberg::IPluginFactoryTrait;
 use vst3::Steinberg::IPluginFactory2Trait;
+use vst3::Steinberg::IPluginFactoryTrait;
 use vst3::Steinberg::PClassInfo;
 use vst3::Steinberg::PClassInfo2;
 use vst3::Steinberg::PFactoryInfo;
+use vst3::Steinberg::kResultOk;
 use vst3::com_scrape_types::ComPtr;
 
 use super::module::VstModule;
@@ -64,7 +64,10 @@ pub fn scan_plugins(custom_path: Option<&str>) -> Result<Vec<PluginInfo>, HostEr
 
     for scan_path in &paths {
         if !scan_path.exists() {
-            debug!("scan path does not exist, skipping: {}", scan_path.display());
+            debug!(
+                "scan path does not exist, skipping: {}",
+                scan_path.display()
+            );
             continue;
         }
 
@@ -97,7 +100,10 @@ pub fn scan_plugins_safe(
 
     for scan_path in &paths {
         if !scan_path.exists() {
-            debug!("scan path does not exist, skipping: {}", scan_path.display());
+            debug!(
+                "scan path does not exist, skipping: {}",
+                scan_path.display()
+            );
             continue;
         }
 
@@ -397,10 +403,7 @@ fn scan_moduleinfo(
             .unwrap_or("");
 
         for class in classes {
-            let category = class
-                .get("Category")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
+            let category = class.get("Category").and_then(|c| c.as_str()).unwrap_or("");
 
             let sub_categories = class
                 .get("Sub Categories")
@@ -491,8 +494,7 @@ pub fn scan_bundle_binary(bundle_path: &Path) -> Result<Vec<PluginInfo>, HostErr
 
             if result == kResultOk {
                 let category = cstr_from_char8_array(&info.category).unwrap_or_default();
-                let sub_categories =
-                    cstr_from_char8_array(&info.subCategories).unwrap_or_default();
+                let sub_categories = cstr_from_char8_array(&info.subCategories).unwrap_or_default();
 
                 if !is_audio_processor_class(&category, &sub_categories) {
                     continue;
@@ -533,7 +535,11 @@ pub fn scan_bundle_binary(bundle_path: &Path) -> Result<Vec<PluginInfo>, HostErr
         let result = unsafe { factory.getClassInfo(i, &mut info) };
 
         if result != kResultOk {
-            warn!("failed to get class info for index {} in {}", i, bundle_path.display());
+            warn!(
+                "failed to get class info for index {} in {}",
+                i,
+                bundle_path.display()
+            );
             continue;
         }
 
@@ -569,10 +575,7 @@ fn is_audio_processor_class(category: &str, sub_categories: &str) -> bool {
 
     // Check subcategories for common audio processor indicators
     let sub_lower = sub_categories.to_lowercase();
-    if sub_lower.contains("fx")
-        || sub_lower.contains("instrument")
-        || sub_lower.contains("audio")
-    {
+    if sub_lower.contains("fx") || sub_lower.contains("instrument") || sub_lower.contains("audio") {
         return true;
     }
 
@@ -597,9 +600,7 @@ pub fn hex_string_to_tuid(hex: &str) -> Option<[std::ffi::c_char; 16]> {
 
 /// Convert a TUID (16-byte array) to a hex string.
 fn tuid_to_hex_string(tuid: &[std::ffi::c_char; 16]) -> String {
-    tuid.iter()
-        .map(|b| format!("{:02X}", *b as u8))
-        .collect()
+    tuid.iter().map(|b| format!("{:02X}", *b as u8)).collect()
 }
 
 /// Extract a Rust String from a null-terminated char8 array.
@@ -657,8 +658,22 @@ mod tests {
     #[test]
     fn test_tuid_to_hex_string() {
         let tuid: [std::ffi::c_char; 16] = [
-            0x01, 0x23, 0x45, 0x67, 0x89u8 as i8, 0xABu8 as i8, 0xCDu8 as i8, 0xEFu8 as i8,
-            0x01, 0x23, 0x45, 0x67, 0x89u8 as i8, 0xABu8 as i8, 0xCDu8 as i8, 0xEFu8 as i8,
+            0x01,
+            0x23,
+            0x45,
+            0x67,
+            0x89u8 as i8,
+            0xABu8 as i8,
+            0xCDu8 as i8,
+            0xEFu8 as i8,
+            0x01,
+            0x23,
+            0x45,
+            0x67,
+            0x89u8 as i8,
+            0xABu8 as i8,
+            0xCDu8 as i8,
+            0xEFu8 as i8,
         ];
         let hex = tuid_to_hex_string(&tuid);
         assert_eq!(hex, "0123456789ABCDEF0123456789ABCDEF");
@@ -666,7 +681,9 @@ mod tests {
 
     #[test]
     fn test_cstr_from_char8_array() {
-        let arr: [std::ffi::c_char; 8] = [b'H' as i8, b'e' as i8, b'l' as i8, b'l' as i8, b'o' as i8, 0, 0, 0];
+        let arr: [std::ffi::c_char; 8] = [
+            b'H' as i8, b'e' as i8, b'l' as i8, b'l' as i8, b'o' as i8, 0, 0, 0,
+        ];
         let s = cstr_from_char8_array(&arr);
         assert_eq!(s, Some("Hello".to_string()));
     }

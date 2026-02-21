@@ -30,9 +30,9 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let bundle_path = std::env::args().nth(1).context(
-        "Usage: agent-audio-scanner <bundle_path>",
-    )?;
+    let bundle_path = std::env::args()
+        .nth(1)
+        .context("Usage: agent-audio-scanner <bundle_path>")?;
 
     let path = Path::new(&bundle_path);
 
@@ -40,8 +40,7 @@ fn run() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))
         .with_context(|| format!("failed to scan bundle: {}", path.display()))?;
 
-    let json = serde_json::to_string(&plugins)
-        .context("failed to serialize plugin info")?;
+    let json = serde_json::to_string(&plugins).context("failed to serialize plugin info")?;
 
     println!("{}", json);
 

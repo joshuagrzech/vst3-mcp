@@ -871,7 +871,8 @@ impl WrapperMcpServer {
                 "is_bypass": info.is_bypass(),
                 "range_probe": range_probe,
             });
-            serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+            serde_json::to_string_pretty(&response)
+                .map_err(|e| format!("Serialization failed: {e}"))
         })
     }
 
@@ -896,9 +897,7 @@ impl WrapperMcpServer {
         })
     }
 
-    #[tool(
-        description = "Load plugin state from a .vstpreset file. Call load_child_plugin first."
-    )]
+    #[tool(description = "Load plugin state from a .vstpreset file. Call load_child_plugin first.")]
     fn load_preset(
         &self,
         Parameters(req): Parameters<LoadPresetRequest>,
@@ -952,8 +951,7 @@ impl WrapperMcpServer {
                 })
             });
 
-        let param = matched
-            .ok_or_else(|| format!("No parameter matches name '{}'", req.name))?;
+        let param = matched.ok_or_else(|| format!("No parameter matches name '{}'", req.name))?;
 
         let id = param
             .get("id")

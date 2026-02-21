@@ -4,12 +4,12 @@
 //! processor during process() calls with sample-accurate timing.
 
 use std::cell::RefCell;
-use vst3::com_scrape_types::ComWrapper;
 use vst3::Steinberg::Vst::{
-    IParameterChanges, IParameterChangesTrait, IParamValueQueue, IParamValueQueueTrait,
-    ParamID, ParamValue,
+    IParamValueQueue, IParamValueQueueTrait, IParameterChanges, IParameterChangesTrait, ParamID,
+    ParamValue,
 };
 use vst3::Steinberg::{kInvalidArgument, kResultOk};
+use vst3::com_scrape_types::ComWrapper;
 
 /// Host-side implementation of IParamValueQueue.
 ///
@@ -63,10 +63,14 @@ impl IParamValueQueueTrait for ParamValueQueue {
         if index >= 0 && (index as usize) < points.len() {
             let (offset, val) = points[index as usize];
             if !sample_offset.is_null() {
-                unsafe { *sample_offset = offset; }
+                unsafe {
+                    *sample_offset = offset;
+                }
             }
             if !value.is_null() {
-                unsafe { *value = val; }
+                unsafe {
+                    *value = val;
+                }
             }
             kResultOk
         } else {
@@ -77,7 +81,9 @@ impl IParamValueQueueTrait for ParamValueQueue {
     unsafe fn addPoint(&self, sample_offset: i32, value: ParamValue, index: *mut i32) -> i32 {
         self.add_point(sample_offset, value);
         if !index.is_null() {
-            unsafe { *index = (self.points.borrow().len() - 1) as i32; }
+            unsafe {
+                *index = (self.points.borrow().len() - 1) as i32;
+            }
         }
         kResultOk
     }
@@ -144,9 +150,7 @@ impl IParameterChangesTrait for ParameterChanges {
     unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
         let queues = self.queues.borrow();
         if index >= 0 && (index as usize) < *self.active_count.borrow() {
-            if let Some(ptr) = queues[index as usize]
-                .to_com_ptr::<IParamValueQueue>()
-            {
+            if let Some(ptr) = queues[index as usize].to_com_ptr::<IParamValueQueue>() {
                 ptr.as_ptr()
             } else {
                 std::ptr::null_mut()
@@ -156,12 +160,18 @@ impl IParameterChangesTrait for ParameterChanges {
         }
     }
 
-    unsafe fn addParameterData(&self, id: *const ParamID, index: *mut i32) -> *mut IParamValueQueue {
+    unsafe fn addParameterData(
+        &self,
+        id: *const ParamID,
+        index: *mut i32,
+    ) -> *mut IParamValueQueue {
         let param_id = if !id.is_null() { unsafe { *id } } else { 0 };
         if let Some(queue) = self.add_parameter(param_id) {
             let count = *self.active_count.borrow();
             if !index.is_null() {
-                unsafe { *index = (count - 1) as i32; }
+                unsafe {
+                    *index = (count - 1) as i32;
+                }
             }
             if let Some(ptr) = queue.to_com_ptr::<IParamValueQueue>() {
                 ptr.as_ptr()
