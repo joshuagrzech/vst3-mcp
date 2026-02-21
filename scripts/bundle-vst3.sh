@@ -30,9 +30,19 @@ if [[ ! -f "$SO" ]]; then
   exit 1
 fi
 
+# Build scanner binary for out-of-process plugin discovery (crash isolation)
+SCANNER="target/$PROFILE/agent-audio-scanner"
+if [[ ! -f "$SCANNER" ]]; then
+  echo "Building scanner binary..."
+  cargo build --"$PROFILE" --bin agent-audio-scanner
+fi
+
 rm -rf "$BUNDLE_NAME"
 mkdir -p "$BUNDLE_NAME/Contents/$ARCH"
+mkdir -p "$BUNDLE_NAME/Contents/Resources"
 cp "$SO" "$BUNDLE_NAME/Contents/$ARCH/AgentAudio Wrapper.so"
+cp "$SCANNER" "$BUNDLE_NAME/Contents/Resources/agent-audio-scanner"
+chmod +x "$BUNDLE_NAME/Contents/Resources/agent-audio-scanner"
 echo "Created $BUNDLE_NAME"
 
 if [[ -n "$INSTALL_DIR" ]]; then

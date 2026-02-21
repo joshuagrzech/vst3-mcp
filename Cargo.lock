@@ -146,6 +146,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "crossbeam-queue",
+ "libc",
  "nih_plug",
  "nih_plug_egui",
  "reqwest",

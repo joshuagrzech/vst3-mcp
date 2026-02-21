@@ -331,8 +331,13 @@ fn scan_directory(dir: &Path, plugins: &mut Vec<PluginInfo>) {
 
 /// Scan a single .vst3 bundle for plugin class info.
 ///
-/// Fast path: try reading moduleinfo.json first.
-/// Slow path: load the module and query the factory.
+/// Use this when the user manually selects a .vst3 path instead of scanning
+/// all system paths. Fast path: moduleinfo.json; slow path: load the module.
+pub fn scan_single_bundle(bundle_path: &Path) -> Result<Vec<PluginInfo>, HostError> {
+    scan_bundle(bundle_path)
+}
+
+/// Scan a single .vst3 bundle for plugin class info (internal).
 fn scan_bundle(bundle_path: &Path) -> Result<Vec<PluginInfo>, HostError> {
     // Fast path: try moduleinfo.json
     let moduleinfo_path = bundle_path

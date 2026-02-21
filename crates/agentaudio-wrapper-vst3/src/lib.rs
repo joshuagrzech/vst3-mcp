@@ -1,4 +1,5 @@
 use std::num::NonZeroU32;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,7 +8,7 @@ use crossbeam_queue::ArrayQueue;
 use nih_plug::prelude::*;
 use nih_plug_egui::{
     EguiState, create_egui_editor,
-    egui::{self, ComboBox},
+    egui,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -27,6 +28,42 @@ use vst3_mcp_host::hosting::types::{BusDirection, BusInfo, BusType, PluginInfo};
 
 const PARAM_QUEUE_CAPACITY: usize = 4096;
 const MAX_PARAM_EVENTS_PER_BLOCK: usize = 512;
+
+/// Locate the agent-audio-scanner binary for out-of-process plugin scanning.
+/// When found, scan_plugins uses it to isolate plugin load crashes from the host.
+fn find_scanner_binary() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("AGENTAUDIO_SCANNER") {
+        let path = PathBuf::from(&p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    #[cfg(unix)]
+    {
+        unsafe {
+            let mut info: libc::Dl_info = std::mem::zeroed();
+            if libc::dladdr(find_scanner_binary as *const _, &mut info) != 0 && !info.dli_fname.is_null() {
+                let fname = std::ffi::CStr::from_ptr(info.dli_fname).to_string_lossy();
+                let so_path = PathBuf::from(fname.as_ref());
+                if let Some(parent) = so_path.parent() {
+                    // Same directory as .so (e.g. Contents/x86_64-linux/)
+                    let same_dir = parent.join("agent-audio-scanner");
+                    if same_dir.is_file() {
+                        return Some(same_dir);
+                    }
+                    // Bundle Resources (e.g. Contents/Resources/)
+                    let resources = parent.parent().map(|c| c.join("Resources").join("agent-audio-scanner"));
+                    if let Some(ref r) = resources {
+                        if r.is_file() {
+                            return Some(r.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
 
 #[derive(Params)]
 struct WrapperParams {
@@ -97,7 +134,9 @@ impl SharedState {
     }
 
     fn scan_plugins(&self, path: Option<&str>) -> Result<Vec<PluginInfo>, String> {
-        let plugins = scanner::scan_plugins(path).map_err(|e| format!("Scan failed: {e}"))?;
+        let scanner_binary = find_scanner_binary();
+        let plugins = scanner::scan_plugins_safe(path, scanner_binary.as_deref())
+            .map_err(|e| format!("Scan failed: {e}"))?;
         let mut cache = self
             .scan_cache
             .lock()
@@ -189,6 +228,39 @@ impl SharedState {
         Ok(())
     }
 
+    /// Load a child plugin by path to a .vst3 bundle. Scans only that bundle.
+    fn load_child_plugin_by_path(&self, path: &str) -> Result<PluginInfo, String> {
+        let path_buf = Path::new(path.trim());
+        if !path_buf.exists() {
+            return Err(format!("Path does not exist: {}", path_buf.display()));
+        }
+        let is_bundle = path_buf
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("vst3"));
+        if !is_bundle || !path_buf.is_dir() {
+            return Err(format!(
+                "Path must be a .vst3 bundle directory (e.g. ~/.vst3/MyPlugin.vst3), got: {}",
+                path_buf.display()
+            ));
+        }
+        let bundle_path = path_buf.to_path_buf();
+
+        let plugins = scanner::scan_single_bundle(&bundle_path)
+            .map_err(|e| format!("Scan failed: {e}"))?;
+
+        let info = plugins
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("No audio plugins found in bundle: {}", bundle_path.display()))?;
+
+        // Update cache for load_child_plugin (UID-based) consistency
+        if let Ok(mut cache) = self.scan_cache.lock() {
+            *cache = vec![info.clone()];
+        }
+
+        self.load_child_plugin(&info.uid)
+    }
+
     fn load_child_plugin(&self, uid: &str) -> Result<PluginInfo, String> {
         let info = self.find_plugin(uid)?;
         let class_id = hex_to_tuid(&info.uid)?;
@@ -274,6 +346,12 @@ struct LoadChildRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct LoadChildByPathRequest {
+    /// Path to a .vst3 bundle (e.g. ~/.vst3/MyPlugin.vst3 or /usr/lib/vst3/Foo.vst3)
+    pub path: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct SetParamRequest {
     pub id: u32,
     pub value: f64,
@@ -292,7 +370,8 @@ struct BatchSetRequest {
 
 #[derive(Default)]
 struct GuiState {
-    selected_uid: Option<String>,
+    /// User-entered path to a .vst3 bundle (e.g. /usr/lib/vst3/MyPlugin.vst3 or ~/.vst3/Synth.vst3)
+    plugin_path: String,
     message: String,
 }
 
@@ -336,7 +415,27 @@ impl WrapperMcpServer {
         serde_json::to_string_pretty(&plugins).map_err(|e| format!("Serialization failed: {e}"))
     }
 
-    #[tool(description = "Load a child VST3 into this wrapper instance.")]
+    #[tool(description = "Load a child VST3 by path to a .vst3 bundle. No system-wide scan.")]
+    fn load_child_plugin_by_path(
+        &self,
+        Parameters(req): Parameters<LoadChildByPathRequest>,
+    ) -> Result<String, String> {
+        let expanded = expand_tilde(&req.path);
+        let info = self.shared.load_child_plugin_by_path(&expanded)?;
+        let _ = self.shared.open_editor();
+
+        let response = serde_json::json!({
+            "status": "loaded",
+            "uid": info.uid,
+            "name": info.name,
+            "vendor": info.vendor,
+            "mcp_name": self.shared.mcp_name(),
+            "instance_id": self.shared.instance_id.as_str(),
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(description = "Load a child VST3 by UID (requires scan_plugins or load_child_plugin_by_path first to populate cache).")]
     fn load_child_plugin(
         &self,
         Parameters(req): Parameters<LoadChildRequest>,
@@ -742,59 +841,34 @@ impl Plugin for AgentAudioWrapper {
                     );
                     ui.separator();
 
-                    if ui.button("Scan Plugins").clicked() {
-                        let msg = match shared.scan_plugins(None) {
-                            Ok(plugins) => format!("Scanned {} plugins", plugins.len()),
-                            Err(e) => format!("Scan failed: {e}"),
-                        };
-                        if let Ok(mut gs) = gui_state.lock() {
-                            gs.message = msg;
-                            if gs.selected_uid.is_none() {
-                                gs.selected_uid = shared
-                                    .scan_cache
-                                    .lock()
-                                    .ok()
-                                    .and_then(|cache| cache.first().map(|p| p.uid.clone()));
+                    ui.label("VST3 bundle path (e.g. ~/.vst3/MyPlugin.vst3):");
+                    {
+                        let mut path = gui_state
+                            .lock()
+                            .ok()
+                            .map(|gs| gs.plugin_path.clone())
+                            .unwrap_or_default();
+                        if ui.text_edit_singleline(&mut path).changed() {
+                            if let Ok(mut gs) = gui_state.lock() {
+                                gs.plugin_path = path;
                             }
                         }
                     }
 
-                    let plugins = shared
-                        .scan_cache
-                        .lock()
-                        .ok()
-                        .map(|v| v.clone())
-                        .unwrap_or_default();
-                    let selected_uid = gui_state.lock().ok().and_then(|gs| gs.selected_uid.clone());
-                    let selected_text = plugins
-                        .iter()
-                        .find(|p| Some(p.uid.clone()) == selected_uid)
-                        .map(|p| format!("{} ({})", p.name, p.uid))
-                        .unwrap_or_else(|| "Select plugin".to_string());
-
-                    ComboBox::from_label("Child Plugin")
-                        .selected_text(selected_text)
-                        .show_ui(ui, |ui| {
-                            for plugin in &plugins {
-                                let label = format!("{} - {}", plugin.name, plugin.vendor);
-                                let mut is_selected = gui_state
-                                    .lock()
-                                    .ok()
-                                    .and_then(|gs| gs.selected_uid.clone())
-                                    .is_some_and(|uid| uid == plugin.uid);
-                                if ui.checkbox(&mut is_selected, label).clicked() && is_selected {
-                                    if let Ok(mut gs) = gui_state.lock() {
-                                        gs.selected_uid = Some(plugin.uid.clone());
-                                    }
-                                }
-                            }
-                        });
+                    let path = gui_state.lock().ok().and_then(|gs| {
+                        let p = gs.plugin_path.trim();
+                        if p.is_empty() {
+                            None
+                        } else {
+                            Some(p.to_string())
+                        }
+                    });
 
                     ui.horizontal(|ui| {
-                        if ui.button("Load Child").clicked() {
-                            let uid = gui_state.lock().ok().and_then(|gs| gs.selected_uid.clone());
-                            let msg = if let Some(uid) = uid {
-                                match shared.load_child_plugin(&uid) {
+                        if ui.button("Load from path").clicked() {
+                            let msg = if let Some(p) = path {
+                                let expanded = expand_tilde(&p);
+                                match shared.load_child_plugin_by_path(&expanded) {
                                     Ok(info) => {
                                         let _ = shared.open_editor();
                                         format!("Loaded {}", info.name)
@@ -802,7 +876,7 @@ impl Plugin for AgentAudioWrapper {
                                     Err(e) => format!("Load failed: {e}"),
                                 }
                             } else {
-                                "No plugin selected".to_string()
+                                "Enter a path to a .vst3 bundle".to_string()
                             };
                             if let Ok(mut gs) = gui_state.lock() {
                                 gs.message = msg;
@@ -990,6 +1064,19 @@ fn validate_supported_routing(buses: &[BusInfo]) -> Result<(), String> {
     } else {
         Err("Unsupported child routing: plugin must expose audio output and either audio input (effect) or event input (instrument).".to_string())
     }
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{}/{}", home, &path[2..]);
+        }
+    } else if path == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return home;
+        }
+    }
+    path.to_string()
 }
 
 fn now_ms() -> u64 {
