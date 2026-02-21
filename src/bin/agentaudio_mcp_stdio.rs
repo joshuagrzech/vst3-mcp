@@ -14,6 +14,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+use vst3_mcp_host::doc_search;
 
 #[derive(Clone)]
 struct RouterStdioShim {
@@ -127,6 +128,22 @@ struct ProxyPreviewVstParameterValuesRequest {
 struct GuardAudioRoutingRequest {
     pub user_message: String,
     pub requested_tool: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchPluginDocsRequest {
+    #[schemars(description = "Plugin name or UID to search (e.g., Serum)")]
+    pub plugin_name: String,
+    #[schemars(description = "Targeted feature/parameter question (e.g., LFO routing)")]
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchSoundDesignGuideRequest {
+    #[schemars(description = "Broad topic or sound goal (e.g., vocal compression, reese bass)")]
+    pub topic: String,
+    #[schemars(description = "Optional deeper query to refine the guide search")]
+    pub query: Option<String>,
 }
 
 #[tool_router]
@@ -315,6 +332,28 @@ impl RouterStdioShim {
     }
 
     #[tool(
+        description = "Search local plugin documentation by plugin_name + query and return top 2-3 excerpts."
+    )]
+    async fn search_plugin_docs(
+        &self,
+        Parameters(req): Parameters<SearchPluginDocsRequest>,
+    ) -> Result<String, String> {
+        let response = doc_search::search_plugin_docs(&req.plugin_name, &req.query)?;
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(
+        description = "Search local sound design guides by topic (and optional query) and return the best recipe excerpts."
+    )]
+    async fn search_sound_design_guide(
+        &self,
+        Parameters(req): Parameters<SearchSoundDesignGuideRequest>,
+    ) -> Result<String, String> {
+        let response = doc_search::search_sound_design_guide(&req.topic, req.query.as_deref())?;
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(
         description = "Deterministic routing guardrail. Run before WebSearch; blocks web route when audio intent is high and docs/news are not explicitly requested."
     )]
     async fn guard_audio_routing(
@@ -350,6 +389,8 @@ impl ServerHandler for RouterStdioShim {
                 "AgentAudio MCP stdio shim.\n\
 Hard routing rule: If user mentions VST/plugin/preset/patch/sound/tone/parameter/knob/automation, use Audio MCP tools first. Do not use web search unless user explicitly asks for docs/news.\n\
 Disambiguation: In audio context, patch = preset/sound configuration, not code diff.\n\
+Before editing an unfamiliar plugin, call search_plugin_docs to pull only relevant plugin documentation excerpts.\n\
+For target outcomes (e.g., reese bass, vocal compression), call search_sound_design_guide to fetch a recipe before tweaking parameters.\n\
 Run guard_audio_routing before any web search call.\n\
 Workflow: scan_plugins -> load_plugin -> find_vst_parameter -> preview_vst_parameter_values -> set_param_realtime/batch_set_realtime (or edit_vst_patch)."
                     .into(),

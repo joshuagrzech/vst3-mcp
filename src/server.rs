@@ -13,6 +13,7 @@ use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
 use tracing::{debug, info, warn};
 
 use vst3_mcp_host::audio;
+use vst3_mcp_host::doc_search;
 use vst3_mcp_host::gui;
 use vst3_mcp_host::hosting::host_app::{ComponentHandler, HostApp};
 use vst3_mcp_host::hosting::module::VstModule;
@@ -96,6 +97,26 @@ pub struct SearchParamsRequest {
     /// Query string to fuzzy match against parameter names.
     #[schemars(description = "Query string to fuzzy match against parameter names")]
     pub query: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchPluginDocsRequest {
+    /// Plugin name or UID to search (e.g., "Serum").
+    #[schemars(description = "Plugin name or UID to search (e.g., Serum)")]
+    pub plugin_name: String,
+    /// Targeted feature/parameter question (e.g., "LFO routing").
+    #[schemars(description = "Targeted feature/parameter question (e.g., LFO routing)")]
+    pub query: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchSoundDesignGuideRequest {
+    /// Broad sound design topic or target outcome (e.g., "vocal compression").
+    #[schemars(description = "Broad sound design topic or target outcome (e.g., vocal compression)")]
+    pub topic: String,
+    /// Optional deeper query to refine the recipe search.
+    #[schemars(description = "Optional deeper query to refine the recipe search")]
+    pub query: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -624,6 +645,36 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
+    #[tool(
+        description = "Search local plugin documentation by plugin_name + query and return only top excerpts (no full file dumps)."
+    )]
+    fn search_plugin_docs(
+        &self,
+        Parameters(req): Parameters<SearchPluginDocsRequest>,
+    ) -> Result<String, String> {
+        info!(
+            "search_plugin_docs called: plugin='{}', query='{}'",
+            req.plugin_name, req.query
+        );
+        let response = doc_search::search_plugin_docs(&req.plugin_name, &req.query)?;
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
+    #[tool(
+        description = "Search local sound-design guides by topic (and optional query) and return top recipe excerpts."
+    )]
+    fn search_sound_design_guide(
+        &self,
+        Parameters(req): Parameters<SearchSoundDesignGuideRequest>,
+    ) -> Result<String, String> {
+        info!(
+            "search_sound_design_guide called: topic='{}', query='{:?}'",
+            req.topic, req.query
+        );
+        let response = doc_search::search_sound_design_guide(&req.topic, req.query.as_deref())?;
+        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+    }
+
     #[tool(description = "Get a single parameter's current value and display string. Call load_plugin first.")]
     fn get_param(
         &self,
@@ -987,6 +1038,8 @@ impl ServerHandler for AudioHost {
                 "VST3 audio processing host.\n\
 Hard routing rule: If user mentions VST/plugin/preset/patch/sound/tone/parameter/knob/automation, use Audio MCP tools first. Do not use web search unless user explicitly asks for docs/news.\n\
 Disambiguation: In audio context, patch = preset/sound configuration, not code diff.\n\
+When editing an unfamiliar plugin, call search_plugin_docs first to retrieve targeted plugin-specific mapping/quirk excerpts before changing parameters.\n\
+When asked for a desired audio outcome (for example a reese bass or vocal compression chain), call search_sound_design_guide first for a recipe, then map to plugin parameters.\n\
 Workflow: scan_plugins -> load_plugin -> find_vst_parameter (search params) -> preview_vst_parameter_values (probe param) -> set_param/batch_set (or edit_vst_patch) -> save_preset.\n\
 Use this workflow before web search."
                     .into(),
