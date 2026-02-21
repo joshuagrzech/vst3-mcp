@@ -548,6 +548,8 @@ struct SetParamByNameRequest {
 #[derive(Default)]
 struct GuiState {
     message: String,
+    /// Path buffer for loading a .vst3 bundle (drag-drop is not supported by the plugin host UI backend).
+    path_to_load: String,
 }
 
 struct WrapperMcpServer {
@@ -1256,19 +1258,55 @@ impl Plugin for AgentAudioWrapper {
                     );
                     ui.separator();
 
-                    ui.label("Drop .vst3 bundle here to load");
-                    let drop_zone = ui.available_rect_before_wrap();
-
-                    // Visual feedback for hovering
-                    if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
-                        ui.painter().rect_filled(
-                            drop_zone,
-                            5.0,
-                            egui::Color32::from_rgba_premultiplied(255, 255, 255, 20),
-                        );
+                    ui.label("Load .vst3 bundle by path (paste path below; drag-and-drop is not supported in this host):");
+                    let mut path_to_load = gui_state
+                        .lock()
+                        .ok()
+                        .map(|g| g.path_to_load.clone())
+                        .unwrap_or_default();
+                    let path_id = egui::Id::new("vst3_path");
+                    let path_response = ui.add(
+                        egui::TextEdit::singleline(&mut path_to_load)
+                            .hint_text("/path/to/Plugin.vst3")
+                            .id(path_id)
+                            .desired_width(ui.available_width() - 60.0),
+                    );
+                    if path_response.changed() {
+                        if let Ok(mut gs) = gui_state.lock() {
+                            gs.path_to_load = path_to_load.clone();
+                        }
+                    }
+                    ui.add_space(2.0);
+                    let load_clicked = ui.button("Load").clicked();
+                    if load_clicked {
+                        let path = path_to_load.trim();
+                        if path.is_empty() {
+                            if let Ok(mut gs) = gui_state.lock() {
+                                gs.message = "Enter a path to a .vst3 bundle".to_string();
+                            }
+                        } else if !path.ends_with(".vst3") {
+                            if let Ok(mut gs) = gui_state.lock() {
+                                gs.message = "Path must end with .vst3".to_string();
+                            }
+                        } else {
+                            match shared.load_child_plugin_by_path(path) {
+                                Ok(info) => {
+                                    let _ = shared.open_editor();
+                                    if let Ok(mut gs) = gui_state.lock() {
+                                        gs.message = format!("Loaded {}", info.name);
+                                        gs.path_to_load.clear();
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Ok(mut gs) = gui_state.lock() {
+                                        gs.message = format!("Load failed: {e}");
+                                    }
+                                }
+                            }
+                        }
                     }
 
-                    // Handle dropped files
+                    // Keep drop handling for backends that may support it in the future
                     if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
                         let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
                         for file in dropped_files {
@@ -1289,8 +1327,9 @@ impl Plugin for AgentAudioWrapper {
                                         }
                                     }
                                 } else {
-                                     if let Ok(mut gs) = gui_state.lock() {
-                                        gs.message = "Dropped file must be a .vst3 bundle".to_string();
+                                    if let Ok(mut gs) = gui_state.lock() {
+                                        gs.message =
+                                            "Dropped file must be a .vst3 bundle".to_string();
                                     }
                                 }
                             }
