@@ -6,10 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossbeam_queue::ArrayQueue;
 use nih_plug::prelude::*;
-use nih_plug_egui::{
-    EguiState, create_egui_editor,
-    egui,
-};
+use nih_plug_egui::{EguiState, create_egui_editor, egui};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
@@ -22,7 +19,7 @@ use uuid::Uuid;
 use vst3_mcp_host::gui;
 use vst3_mcp_host::hosting::host_app::{ComponentHandler, HostApp};
 use vst3_mcp_host::hosting::module::VstModule;
-use vst3_mcp_host::hosting::plugin::PluginInstance;
+use vst3_mcp_host::hosting::plugin::{InputEvent, PluginInstance};
 use vst3_mcp_host::hosting::scanner;
 use vst3_mcp_host::hosting::types::{BusDirection, BusInfo, BusType, PluginInfo};
 
@@ -42,7 +39,9 @@ fn find_scanner_binary() -> Option<PathBuf> {
     {
         unsafe {
             let mut info: libc::Dl_info = std::mem::zeroed();
-            if libc::dladdr(find_scanner_binary as *const _, &mut info) != 0 && !info.dli_fname.is_null() {
+            if libc::dladdr(find_scanner_binary as *const _, &mut info) != 0
+                && !info.dli_fname.is_null()
+            {
                 let fname = std::ffi::CStr::from_ptr(info.dli_fname).to_string_lossy();
                 let so_path = PathBuf::from(fname.as_ref());
                 if let Some(parent) = so_path.parent() {
@@ -52,7 +51,9 @@ fn find_scanner_binary() -> Option<PathBuf> {
                         return Some(same_dir);
                     }
                     // Bundle Resources (e.g. Contents/Resources/)
-                    let resources = parent.parent().map(|c| c.join("Resources").join("agent-audio-scanner"));
+                    let resources = parent
+                        .parent()
+                        .map(|c| c.join("Resources").join("agent-audio-scanner"));
                     if let Some(ref r) = resources {
                         if r.is_file() {
                             return Some(r.clone());
@@ -86,10 +87,22 @@ struct QueuedParamChange {
     enqueued_at_ms: u64,
 }
 
-#[derive(Default)]
 struct EditorRuntime {
     close_signal: Arc<AtomicBool>,
+    is_open: Arc<AtomicBool>,
+    plugin_name: Arc<RwLock<String>>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Default for EditorRuntime {
+    fn default() -> Self {
+        Self {
+            close_signal: Arc::new(AtomicBool::new(true)),
+            is_open: Arc::new(AtomicBool::new(false)),
+            plugin_name: Arc::new(RwLock::new(String::new())),
+            thread: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -166,17 +179,30 @@ impl SharedState {
     }
 
     fn close_editor(&self) -> bool {
-        let mut editor = match self.editor_runtime.lock() {
-            Ok(guard) => guard,
+        let (close_signal, is_open, has_thread, was_open) = match self.editor_runtime.lock() {
+            Ok(editor) => (
+                Arc::clone(&editor.close_signal),
+                Arc::clone(&editor.is_open),
+                editor.thread.is_some(),
+                editor.is_open.load(Ordering::Relaxed),
+            ),
             Err(_) => return false,
         };
-        editor.close_signal.store(true, Ordering::Relaxed);
-        if let Some(handle) = editor.thread.take() {
-            let _ = handle.join();
-            true
-        } else {
-            false
+
+        if !has_thread {
+            return false;
         }
+
+        close_signal.store(true, Ordering::Relaxed);
+
+        for _ in 0..200 {
+            if !is_open.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        was_open
     }
 
     fn open_editor(&self) -> Result<(), String> {
@@ -188,24 +214,123 @@ impl SharedState {
             .map(|p| p.name.clone())
             .ok_or_else(|| "No child plugin loaded".to_string())?;
 
-        self.close_editor();
+        // If the persistent editor thread is already running, re-open using the existing loop.
+        {
+            let editor = self
+                .editor_runtime
+                .lock()
+                .map_err(|e| format!("Lock error: {e}"))?;
+            if let Some(handle) = editor.thread.as_ref() {
+                if handle.is_finished() {
+                    return Err("Editor event loop stopped unexpectedly; reload the wrapper to recover".to_string());
+                }
 
+                if let Ok(mut name) = editor.plugin_name.write() {
+                    *name = plugin_name.clone();
+                }
+                let was_open = editor.is_open.load(Ordering::Relaxed);
+                editor.close_signal.store(false, Ordering::Relaxed);
+                if was_open {
+                    return Ok(());
+                }
+            } else {
+                drop(editor);
+                return self.start_editor_thread(plugin_name);
+            }
+        }
+
+        // Wait for the persistent loop to create the window for this open request.
+        for _ in 0..500 {
+            let is_open = self
+                .editor_runtime
+                .lock()
+                .map(|e| e.is_open.load(Ordering::Relaxed))
+                .unwrap_or(false);
+            if is_open {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        Err("Timed out waiting for editor window to open".to_string())
+    }
+
+    fn start_editor_thread(&self, plugin_name: String) -> Result<(), String> {
         let plugin_arc = Arc::clone(&self.child_plugin);
-        let close_signal = Arc::new(AtomicBool::new(false));
-        let close_signal_clone = Arc::clone(&close_signal);
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+
+        let (close_signal, is_open, name_arc) = {
+            let editor = self
+                .editor_runtime
+                .lock()
+                .map_err(|e| format!("Lock error: {e}"))?;
+
+            if let Some(handle) = editor.thread.as_ref() {
+                if !handle.is_finished() {
+                    if let Ok(mut name) = editor.plugin_name.write() {
+                        *name = plugin_name;
+                    }
+                    editor.close_signal.store(false, Ordering::Relaxed);
+                    return Ok(());
+                }
+            }
+
+            if let Ok(mut name) = editor.plugin_name.write() {
+                *name = plugin_name;
+            }
+            editor.close_signal.store(false, Ordering::Relaxed);
+            editor.is_open.store(false, Ordering::Relaxed);
+
+            (
+                Arc::clone(&editor.close_signal),
+                Arc::clone(&editor.is_open),
+                Arc::clone(&editor.plugin_name),
+            )
+        };
 
         let handle = std::thread::spawn(move || {
-            let (tx, _rx) = std::sync::mpsc::channel();
-            let _ = gui::open_editor_window(plugin_arc, plugin_name, tx, close_signal_clone);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                gui::open_editor_window_persistent(
+                    plugin_arc,
+                    name_arc,
+                    opened_tx,
+                    close_signal,
+                    is_open,
+                )
+            }));
+
+            if let Ok(Err(e)) = result {
+                nih_log!("Persistent editor loop error: {e}");
+            } else if let Err(payload) = result {
+                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "non-string panic payload".to_string()
+                };
+                nih_log!("Persistent editor loop panicked: {msg}");
+            }
         });
 
-        let mut editor = self
-            .editor_runtime
-            .lock()
-            .map_err(|e| format!("Lock error: {e}"))?;
-        editor.close_signal = close_signal;
-        editor.thread = Some(handle);
-        Ok(())
+        {
+            let mut editor = self
+                .editor_runtime
+                .lock()
+                .map_err(|e| format!("Lock error: {e}"))?;
+            editor.thread = Some(handle);
+        }
+
+        match opened_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err("Timed out waiting for editor window to open".to_string())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err("Editor thread exited before reporting open state".to_string())
+            }
+        }
     }
 
     fn unload_child_plugin(&self) -> Result<(), String> {
@@ -245,13 +370,15 @@ impl SharedState {
         }
         let bundle_path = path_buf.to_path_buf();
 
-        let plugins = scanner::scan_single_bundle(&bundle_path)
-            .map_err(|e| format!("Scan failed: {e}"))?;
+        let plugins =
+            scanner::scan_single_bundle(&bundle_path).map_err(|e| format!("Scan failed: {e}"))?;
 
-        let info = plugins
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("No audio plugins found in bundle: {}", bundle_path.display()))?;
+        let info = plugins.into_iter().next().ok_or_else(|| {
+            format!(
+                "No audio plugins found in bundle: {}",
+                bundle_path.display()
+            )
+        })?;
 
         // Update cache for load_child_plugin (UID-based) consistency
         if let Ok(mut cache) = self.scan_cache.lock() {
@@ -435,7 +562,9 @@ impl WrapperMcpServer {
         serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
     }
 
-    #[tool(description = "Load a child VST3 by UID (requires scan_plugins or load_child_plugin_by_path first to populate cache).")]
+    #[tool(
+        description = "Load a child VST3 by UID (requires scan_plugins or load_child_plugin_by_path first to populate cache)."
+    )]
     fn load_child_plugin(
         &self,
         Parameters(req): Parameters<LoadChildRequest>,
@@ -977,7 +1106,7 @@ impl Plugin for AgentAudioWrapper {
         &mut self,
         buffer: &mut Buffer<'_>,
         _aux: &mut AuxiliaryBuffers<'_>,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         if buffer.is_empty() {
             return ProcessStatus::Normal;
@@ -1000,6 +1129,12 @@ impl Plugin for AgentAudioWrapper {
         }
 
         let num_samples = buffer.samples();
+        while let Some(event) = context.next_event() {
+            if let Some(input_event) = map_note_event_to_input_event(event, num_samples as i32) {
+                child.queue_input_event(input_event);
+            }
+        }
+
         let channels = buffer.as_slice();
         if self.input_staging.len() < channels.len() {
             self.input_staging
@@ -1045,6 +1180,71 @@ impl Vst3Plugin for AgentAudioWrapper {
 }
 
 nih_export_vst3!(AgentAudioWrapper);
+
+fn map_note_event_to_input_event(event: NoteEvent<()>, block_samples: i32) -> Option<InputEvent> {
+    let clamp_timing = |timing: u32| -> i32 {
+        if block_samples <= 0 {
+            0
+        } else {
+            (timing as i32).clamp(0, block_samples.saturating_sub(1))
+        }
+    };
+
+    match event {
+        NoteEvent::NoteOn {
+            timing,
+            voice_id,
+            channel,
+            note,
+            velocity,
+        } => Some(InputEvent::NoteOn {
+            timing: clamp_timing(timing),
+            channel: (channel.min(15)) as i16,
+            note: (note.min(127)) as i16,
+            velocity: velocity.clamp(0.0, 1.0),
+            note_id: voice_id.unwrap_or(-1),
+        }),
+        NoteEvent::NoteOff {
+            timing,
+            voice_id,
+            channel,
+            note,
+            velocity,
+        } => Some(InputEvent::NoteOff {
+            timing: clamp_timing(timing),
+            channel: (channel.min(15)) as i16,
+            note: (note.min(127)) as i16,
+            velocity: velocity.clamp(0.0, 1.0),
+            note_id: voice_id.unwrap_or(-1),
+        }),
+        NoteEvent::Choke {
+            timing,
+            voice_id,
+            channel,
+            note,
+        } => Some(InputEvent::NoteOff {
+            timing: clamp_timing(timing),
+            channel: (channel.min(15)) as i16,
+            note: (note.min(127)) as i16,
+            velocity: 0.0,
+            note_id: voice_id.unwrap_or(-1),
+        }),
+        NoteEvent::PolyPressure {
+            timing,
+            voice_id,
+            channel,
+            note,
+            pressure,
+        } => Some(InputEvent::PolyPressure {
+            timing: clamp_timing(timing),
+            channel: (channel.min(15)) as i16,
+            note: (note.min(127)) as i16,
+            pressure: pressure.clamp(0.0, 1.0),
+            note_id: voice_id.unwrap_or(-1),
+        }),
+        _ => None,
+    }
+}
 
 fn validate_supported_routing(buses: &[BusInfo]) -> Result<(), String> {
     let has_audio_input = buses
