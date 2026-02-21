@@ -6,9 +6,13 @@
 //! GUI event loop.
 
 use std::collections::HashMap;
-use std::os::unix::io::RawFd;
 use std::sync::Mutex;
 use std::time::Instant;
+
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
+#[cfg(not(unix))]
+type RawFd = i32;
 
 use tracing::debug;
 use vst3::com_scrape_types::Unknown;
