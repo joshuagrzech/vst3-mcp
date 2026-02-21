@@ -914,6 +914,26 @@ impl PluginInstance {
         }
     }
 
+    /// Get the human-readable display string for a specific parameter value.
+    ///
+    /// Does not change the plugin state. Useful for probing values.
+    pub fn get_parameter_display_for_value(&self, id: u32, value: f64) -> Result<String, HostError> {
+        let ctrl = self.controller.as_ref()
+            .ok_or_else(|| HostError::InvalidState("no edit controller available".to_string()))?;
+
+        unsafe {
+            let mut string128: [u16; 128] = [0; 128];
+            let result = ctrl.getParamStringByValue(id, value, &mut string128 as *mut _);
+
+            if result == kResultOk {
+                Ok(string128_to_string(&string128))
+            } else {
+                // Fallback
+                Ok(format!("{:.3}", value))
+            }
+        }
+    }
+
     /// Get the tail length in samples reported by the plugin.
     ///
     /// Returns the number of samples the plugin needs to process after
