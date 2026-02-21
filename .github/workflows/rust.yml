@@ -43,7 +43,8 @@ jobs:
       
     - name: Install system dependencies for x11
       run: sudo apt-get update && sudo apt-get install -y libx11-dev libx11-xcb-dev
-      
+    - name: Install X11 development libraries
+      run: sudo apt-get update && sudo apt-get install -y libx11-dev libxcursor-dev
     - name: Build Release Bundle
       run: ./scripts/master-release-installer.sh "${{ github.workspace }}/dist"
 
