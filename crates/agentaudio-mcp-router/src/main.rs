@@ -78,6 +78,19 @@ struct ProxyInstanceOnly {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ProxyListParamsRequest {
+    pub instance_id: Option<String>,
+    /// Optional name prefix filter (case-insensitive). Only returns params whose names start with this prefix.
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProxySearchParamsRequest {
+    pub instance_id: Option<String>,
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ProxySetParamRequest {
     pub instance_id: Option<String>,
     pub id: u32,
@@ -242,59 +255,53 @@ fn contains_term(lower: &str, term: &str) -> bool {
     }
 }
 
-fn query_terms(query: &str) -> Vec<String> {
+/// Returns (primary_terms, alias_terms) separately so scoring can weight them differently.
+fn query_terms(query: &str) -> (Vec<String>, Vec<String>) {
     let lower = query.to_lowercase();
-    let mut terms: Vec<String> = lower
+    let primary: Vec<String> = lower
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|t| !t.is_empty())
         .map(ToString::to_string)
         .collect();
 
+    let mut aliases: Vec<String> = Vec::new();
     if lower.contains("brighter") {
-        terms.extend(
-            ["bright", "brightness", "high", "treble", "presence"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
+        aliases.extend(["bright", "brightness", "treble", "presence"].iter().map(|s| s.to_string()));
     }
     if lower.contains("harsh") {
-        terms.extend(
-            ["harsh", "resonance", "q", "high", "presence"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
+        aliases.extend(["harsh", "resonance", "q", "presence"].iter().map(|s| s.to_string()));
     }
     if lower.contains("reverb") {
-        terms.extend(
-            ["reverb", "decay", "room", "wet", "mix"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
+        // Omit "decay" and "mix" — too ambiguous (match unrelated Envelope/Volume params)
+        aliases.extend(["room", "wet"].iter().map(|s| s.to_string()));
     }
 
-    terms.sort();
-    terms.dedup();
-    terms
+    // Remove aliases that duplicate primary terms
+    aliases.retain(|a| !primary.contains(a));
+    aliases.sort();
+    aliases.dedup();
+    (primary, aliases)
 }
 
-fn parameter_matches_query(param: &serde_json::Value, terms: &[String]) -> bool {
-    if terms.is_empty() {
-        return true;
+/// Score a param against primary and alias terms. Returns 0 if no match.
+/// Higher score = better match. Primary terms outweigh aliases.
+fn score_param(param: &serde_json::Value, primary: &[String], aliases: &[String]) -> u32 {
+    let name = param.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+    let name_words: Vec<&str> = name.split_whitespace().collect();
+    let display = param.get("display").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+    let mut score = 0u32;
+
+    for term in primary {
+        if name_words.iter().any(|w| *w == term.as_str()) { score += 100; }  // exact word in name
+        else if name.starts_with(term.as_str()) { score += 80; }             // name prefix
+        else if name.contains(term.as_str()) { score += 40; }               // substring in name
+        if display.contains(term.as_str()) { score += 5; }                   // in display value
     }
-
-    let name = param
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_lowercase();
-    let display = param
-        .get("display")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_lowercase();
-    let haystack = format!("{name} {display}");
-
-    terms.iter().any(|term| contains_term(&haystack, term))
+    for term in aliases {
+        if name_words.iter().any(|w| *w == term.as_str()) { score += 10; }
+        else if name.contains(term.as_str()) { score += 3; }
+    }
+    score
 }
 
 fn parse_params_from_list_result(raw: &str) -> Result<Vec<serde_json::Value>, String> {
@@ -476,7 +483,7 @@ impl RouterMcpServer {
         let reg = self.state.registry.read().await;
         reg.get(instance_id)
             .map(|i| i.endpoint.clone())
-            .ok_or_else(|| format!("Unknown instance_id '{instance_id}'. Call list_instances."))
+            .ok_or_else(|| format!("Unknown instance_id '{instance_id}'. Call list_instances to get valid IDs."))
     }
 
     async fn call_wrapper_tool(
@@ -612,14 +619,38 @@ impl RouterMcpServer {
     }
 
     #[tool(
-        description = "List plugin parameters/knobs and current values. Use when user says parameter/knob/automation/make brighter/reduce reverb."
+        description = "List plugin parameters/knobs and current values. Supports optional prefix filter (e.g. prefix='Reverb') to narrow results. Use list_param_groups to discover valid prefixes."
     )]
     async fn list_params(
+        &self,
+        Parameters(req): Parameters<ProxyListParamsRequest>,
+    ) -> Result<String, String> {
+        let id = self.resolve_instance_id(req.instance_id).await?;
+        let args = if req.prefix.is_some() {
+            serde_json::json!({ "prefix": req.prefix }).as_object().cloned()
+        } else {
+            None
+        };
+        self.call_wrapper_tool(&id, "list_params", args).await
+    }
+
+    #[tool(description = "Search parameters by exact name substring. Faster and more precise than find_vst_parameter when you know the param name.")]
+    async fn search_params(
+        &self,
+        Parameters(req): Parameters<ProxySearchParamsRequest>,
+    ) -> Result<String, String> {
+        let id = self.resolve_instance_id(req.instance_id).await?;
+        let args = serde_json::json!({ "query": req.query }).as_object().cloned();
+        self.call_wrapper_tool(&id, "search_params", args).await
+    }
+
+    #[tool(description = "List logical parameter groups available in the loaded plugin (e.g. 'Reverb', 'Envelope 1', 'Filter 1'). Use before list_params or find_vst_parameter to discover available sections.")]
+    async fn list_param_groups(
         &self,
         Parameters(req): Parameters<ProxyInstanceOnly>,
     ) -> Result<String, String> {
         let id = self.resolve_instance_id(req.instance_id).await?;
-        self.call_wrapper_tool(&id, "list_params", None).await
+        self.call_wrapper_tool(&id, "list_param_groups", None).await
     }
 
     #[tool(
@@ -672,7 +703,7 @@ impl RouterMcpServer {
     }
 
     #[tool(
-        description = "Search plugin parameters by natural language (e.g. 'attack', 'release', 'make brighter', 'reduce reverb')."
+        description = "Search plugin parameters by natural language (e.g. 'attack', 'release', 'make brighter', 'reduce reverb'). Results are ranked by relevance."
     )]
     async fn find_vst_parameter(
         &self,
@@ -681,21 +712,29 @@ impl RouterMcpServer {
         let id = self.resolve_instance_id(req.instance_id).await?;
         let raw = self.call_wrapper_tool(&id, "list_params", None).await?;
         let params = parse_params_from_list_result(&raw)?;
-        let terms = query_terms(&req.query);
+        let source_count = params.len();
+        let (primary, aliases) = query_terms(&req.query);
         let limit = req.limit.unwrap_or(20).max(1);
 
-        let matches: Vec<serde_json::Value> = params
-            .iter()
-            .filter(|p| parameter_matches_query(p, &terms))
-            .take(limit)
-            .cloned()
+        let mut scored: Vec<(u32, serde_json::Value)> = params
+            .into_iter()
+            .filter_map(|p| {
+                let s = score_param(&p, &primary, &aliases);
+                if s > 0 { Some((s, p)) } else { None }
+            })
             .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let matches: Vec<serde_json::Value> = scored.into_iter().take(limit).map(|(_, p)| p).collect();
+
+        let mut all_terms: Vec<String> = primary.iter().chain(aliases.iter()).cloned().collect();
+        all_terms.sort();
+        all_terms.dedup();
 
         let response = serde_json::json!({
             "query": req.query,
-            "terms": terms,
+            "terms": all_terms,
             "count": matches.len(),
-            "source_count": params.len(),
+            "source_count": source_count,
             "matches": matches,
             "next_step": "Use preview_vst_parameter_values, then set_param_realtime/batch_set_realtime (or edit_vst_patch).",
         });

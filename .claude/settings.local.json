@@ -4,7 +4,8 @@
       "Bash(node /home/obscurorevelio/.claude/get-shit-done/bin/gsd-tools.js commit:*)",
       "Bash(git config:*)",
       "WebSearch",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "mcp__agentaudio-router__scan_plugins"
     ]
   }
 }

@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentAudio — Control VST Plugins with AI</title>
+  <meta name="description" content="Use Claude, Cursor, or Gemini to control VST3 plugins in plain English. Natural language parameter search, realtime updates—while your plugin runs in your DAW.">
+  <style>
+    :root {
+      --bg: #0f1216;
+      --bg-elevated: #161b22;
+      --bg-card: #1c2128;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --accent: #58a6ff;
+      --accent-dim: #388bfd66;
+      --border: #30363d;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+      background-image:
+        linear-gradient(180deg, transparent 0%, var(--bg) 100%),
+        repeating-linear-gradient(
+          90deg,
+          transparent,
+          transparent 48px,
+          rgba(88, 166, 255, 0.03) 48px,
+          rgba(88, 166, 255, 0.03) 49px
+        );
+    }
+
+    .container {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 0 1.5rem;
+    }
+
+    header {
+      padding: 4rem 0 3rem;
+      text-align: center;
+    }
+
+    h1 {
+      font-size: clamp(1.75rem, 5vw, 2.5rem);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 1rem;
+    }
+
+    .subhead {
+      font-size: 1.1rem;
+      color: var(--text-muted);
+      max-width: 540px;
+      margin: 0 auto 2rem;
+    }
+
+    .cta {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.6rem 1.2rem;
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+      border-radius: 6px;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: #6eb3ff;
+    }
+
+    .btn-secondary {
+      background: var(--bg-elevated);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: var(--bg-card);
+      border-color: var(--text-muted);
+    }
+
+    section {
+      padding: 3rem 0;
+      border-top: 1px solid var(--border);
+    }
+
+    section:first-of-type {
+      border-top: none;
+    }
+
+    h2 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      margin: 0 0 1.5rem;
+    }
+
+    .flow {
+      display: flex;
+      gap: 1rem;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .flow-step {
+      flex: 1;
+      min-width: 160px;
+      padding: 1rem;
+      background: var(--bg-card);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+
+    .flow-step strong {
+      display: block;
+      color: var(--accent);
+      font-size: 0.9rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .features {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .feature {
+      padding: 1rem;
+      background: var(--bg-elevated);
+      border-radius: 8px;
+      border-left: 3px solid var(--accent-dim);
+    }
+
+    .feature strong {
+      display: block;
+      margin-bottom: 0.25rem;
+    }
+
+    .feature span {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    .agents {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .agent {
+      padding: 0.6rem 1rem;
+      background: var(--bg-card);
+      border-radius: 6px;
+      font-weight: 500;
+      border: 1px solid var(--border);
+    }
+
+    pre {
+      margin: 0;
+      padding: 1.25rem;
+      background: var(--bg-card);
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.9rem;
+      border: 1px solid var(--border);
+    }
+
+    code {
+      font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+    }
+
+    .docs-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .docs-links a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    .docs-links a:hover {
+      text-decoration: underline;
+    }
+
+    footer {
+      padding: 3rem 0;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      border-top: 1px solid var(--border);
+    }
+
+    footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Control Your VST Plugins with AI</h1>
+      <p class="subhead">
+        Use Claude, Cursor, or Gemini to tweak parameters in plain English—"make it brighter",
+        "reduce reverb", "find the cutoff knob"—while your plugin runs in your DAW.
+      </p>
+      <div class="cta">
+        <a href="https://github.com/joshuagrzech/vst3-mcp" class="btn btn-primary">View on GitHub</a>
+        <a href="#quickstart" class="btn btn-secondary">Quick Start</a>
+      </div>
+    </header>
+
+    <section>
+      <h2>How it works</h2>
+      <div class="flow">
+        <div class="flow-step"><strong>1. DAW</strong> Insert AgentAudio Wrapper on a track.</div>
+        <div class="flow-step"><strong>2. Wrapper</strong> Load any VST3 child plugin and expose it to MCP.</div>
+        <div class="flow-step"><strong>3. AI</strong> Your coding agent sends realtime parameter updates.</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Features</h2>
+      <div class="features">
+        <div class="feature">
+          <strong>One wrapper, any VST3</strong>
+          <span>Insert a single plugin; host Serum, FabFilter, compressors, synths—anything.</span>
+        </div>
+        <div class="feature">
+          <strong>Natural-language parameter search</strong>
+          <span>Ask "make brighter", "less harsh", "reduce reverb"—find the right knob by intent.</span>
+        </div>
+        <div class="feature">
+          <strong>Realtime updates while audio plays</strong>
+          <span>Parameter changes apply on the audio thread; no need for .vstpreset files.</span>
+        </div>
+        <div class="feature">
+          <strong>One-line install</strong>
+          <span>Add MCP support to Cursor, Claude Code, or Gemini CLI in seconds.</span>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Supported agents</h2>
+      <div class="agents">
+        <span class="agent">Cursor</span>
+        <span class="agent">Claude Code</span>
+        <span class="agent">Gemini CLI</span>
+      </div>
+    </section>
+
+    <section id="quickstart">
+      <h2>Quick Start</h2>
+      <p>Build the wrapper, install into your DAW plugin path, then add MCP to your coding agent:</p>
+      <pre><code>cargo build --release --manifest-path crates/agentaudio-wrapper-vst3/Cargo.toml
+./scripts/build-and-install-vst3.sh release ~/.vst3
+
+cargo run --bin agentaudio-mcp -- install</code></pre>
+      <p>Start the router daemon, then insert AgentAudio Wrapper in your DAW (Ardour, REAPER, Bitwig).</p>
+    </section>
+
+    <section>
+      <h2>Docs</h2>
+      <div class="docs-links">
+        <a href="https://github.com/joshuagrzech/vst3-mcp/blob/master/docs/USAGE.md">Usage Guide</a>
+        <a href="https://github.com/joshuagrzech/vst3-mcp/blob/master/docs/API.md">API Reference</a>
+        <a href="https://github.com/joshuagrzech/vst3-mcp/blob/master/docs/EXAMPLES.md">Examples</a>
+      </div>
+    </section>
+
+    <section>
+      <h2>Tech</h2>
+      <p>Linux (x86_64-linux). Built with Rust, <a href="https://github.com/robbert-vdh/nih-plug" style="color: var(--accent)">nih-plug</a>, and <a href="https://modelcontextprotocol.io" style="color: var(--accent)">MCP</a>.</p>
+    </section>
+
+    <footer>
+      <a href="https://github.com/joshuagrzech/vst3-mcp">vst3-mcp</a> — AgentAudio Wrapper &amp; MCP Router
+    </footer>
+  </div>
+</body>
+</html>

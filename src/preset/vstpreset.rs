@@ -56,6 +56,10 @@ pub fn save_preset(
     component_state: &[u8],
     controller_state: Option<&[u8]>,
 ) -> Result<(), HostError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| HostError::PresetError(format!("failed to create preset directory: {}", e)))?;
+    }
     let file = std::fs::File::create(path)
         .map_err(|e| HostError::PresetError(format!("failed to create preset file: {}", e)))?;
     let mut writer = std::io::BufWriter::new(file);
