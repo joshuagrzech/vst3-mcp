@@ -82,6 +82,23 @@ pub struct SetParamRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProbeParamRequest {
+    /// Parameter ID to probe.
+    #[schemars(description = "Parameter ID to probe")]
+    pub id: u32,
+    /// List of normalized values [0.0, 1.0] to test.
+    #[schemars(description = "List of normalized values [0.0, 1.0] to test")]
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchParamsRequest {
+    /// Query string to fuzzy match against parameter names.
+    #[schemars(description = "Query string to fuzzy match against parameter names")]
+    pub query: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ParamChange {
     /// Parameter ID.
     #[schemars(description = "Parameter ID")]
@@ -440,29 +457,21 @@ impl AudioHost {
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
-    #[tool(description = "List all writable parameters with current values. Returns parameter ID, name, value, and display string for each. Call load_plugin first.")]
+    #[tool(description = "List all writable parameters with metadata (value, display, units, steps). Call load_plugin first.")]
     fn list_params(&self) -> Result<String, String> {
         info!("list_params called");
 
-        let plugin_guard = self
-            .plugin
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-
-        let plugin = plugin_guard
-            .as_ref()
-            .ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+        let plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let plugin = plugin_guard.as_ref().ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
 
         let count = plugin.get_parameter_count();
         let mut parameters = Vec::new();
 
         for i in 0..count {
             if let Ok(info) = plugin.get_parameter_info(i) {
-                // Only include writable, non-hidden parameters
                 if info.is_writable() && !info.is_hidden() {
                     let value = plugin.get_parameter(info.id);
-                    let display = plugin
-                        .get_parameter_display(info.id)
+                    let display = plugin.get_parameter_display(info.id)
                         .unwrap_or_else(|_| format!("{:.3}", value));
 
                     parameters.push(serde_json::json!({
@@ -470,6 +479,8 @@ impl AudioHost {
                         "name": info.title,
                         "value": value,
                         "display": display,
+                        "units": info.units,
+                        "step_count": info.step_count
                     }));
                 }
             }
@@ -481,6 +492,84 @@ impl AudioHost {
         });
 
         info!("list_params found {} writable parameters", parameters.len());
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(description = "Simulate parameter values to see their display strings (e.g., '100 Hz', 'On') without changing the plugin state.")]
+    fn probe_param(
+        &self,
+        Parameters(req): Parameters<ProbeParamRequest>,
+    ) -> Result<String, String> {
+        info!("probe_param called: id={}, values={:?}", req.id, req.values);
+
+        let plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let plugin = plugin_guard.as_ref().ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+
+        let mut results = Vec::new();
+
+        for &val in &req.values {
+            if val < 0.0 || val > 1.0 {
+                return Err(format!("Invalid value {}. Must be [0.0, 1.0]", val));
+            }
+
+            let display = plugin.get_parameter_display_for_value(req.id, val)
+                .unwrap_or_else(|_| format!("{:.3}", val));
+
+            results.push(serde_json::json!({
+                "value": val,
+                "display": display
+            }));
+        }
+
+        let response = serde_json::json!({
+            "id": req.id,
+            "probes": results
+        });
+
+        Ok(serde_json::to_string_pretty(&response).unwrap())
+    }
+
+    #[tool(description = "Search for parameters by name. Useful for plugins with many parameters where list_params is too large.")]
+    fn search_params(
+        &self,
+        Parameters(req): Parameters<SearchParamsRequest>,
+    ) -> Result<String, String> {
+        info!("search_params called: query='{}'", req.query);
+
+        let plugin_guard = self.plugin.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let plugin = plugin_guard.as_ref().ok_or_else(|| "No plugin loaded. Call load_plugin first.".to_string())?;
+
+        let count = plugin.get_parameter_count();
+        let query_lower = req.query.to_lowercase();
+        let mut matches = Vec::new();
+
+        for i in 0..count {
+            if let Ok(info) = plugin.get_parameter_info(i) {
+                // Filter: must match query, be writable, and not hidden
+                if info.title.to_lowercase().contains(&query_lower) && info.is_writable() && !info.is_hidden() {
+                    let value = plugin.get_parameter(info.id);
+                    let display = plugin.get_parameter_display(info.id)
+                        .unwrap_or_else(|_| format!("{:.3}", value));
+
+                    matches.push(serde_json::json!({
+                        "id": info.id,
+                        "name": info.title,
+                        "value": value,
+                        "display": display,
+                        "units": info.units,
+                        "step_count": info.step_count
+                    }));
+                }
+            }
+        }
+
+        let response = serde_json::json!({
+            "query": req.query,
+            "matches": matches,
+            "count": matches.len()
+        });
+
+        info!("search_params found {} matches", matches.len());
         Ok(serde_json::to_string_pretty(&response).unwrap())
     }
 
