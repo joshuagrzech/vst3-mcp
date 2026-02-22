@@ -5,13 +5,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use vst3_mcp_host::audio;
 use vst3_mcp_host::doc_search;
@@ -200,8 +201,12 @@ pub struct AudioHost {
     /// Last scan results cached for load_plugin lookup.
     scan_cache: Arc<Mutex<Vec<PluginInfo>>>,
     /// Close signal for the editor window (shared with the GUI thread).
-    editor_close_signal: Arc<std::sync::atomic::AtomicBool>,
-    /// Handle to the GUI thread so we can join/detect if it's still alive.
+    editor_close_signal: Arc<AtomicBool>,
+    /// Whether the editor window is currently open (set by persistent loop).
+    editor_is_open: Arc<AtomicBool>,
+    /// Plugin name for the editor window title (shared with GUI thread).
+    editor_plugin_name: Arc<RwLock<String>>,
+    /// Handle to the persistent GUI thread. Never joined — thread runs for process lifetime.
     editor_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     /// Cached param metadata (id, name, units, step_count). Populated on first find_vst_parameter/list_param_groups call.
     /// Invalidated on load_plugin/unload_plugin. Avoids re-fetching static metadata on every search.
@@ -216,7 +221,9 @@ impl AudioHost {
             plugin_info: Arc::new(Mutex::new(None)),
             module: Arc::new(Mutex::new(None)),
             scan_cache: Arc::new(Mutex::new(Vec::new())),
-            editor_close_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            editor_close_signal: Arc::new(AtomicBool::new(true)),
+            editor_is_open: Arc::new(AtomicBool::new(false)),
+            editor_plugin_name: Arc::new(RwLock::new(String::new())),
             editor_thread: Arc::new(Mutex::new(None)),
             param_cache: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
@@ -1114,9 +1121,6 @@ impl AudioHost {
     fn open_editor(&self) -> Result<String, String> {
         info!("open_editor called");
 
-        // Close any existing editor first
-        self.close_editor_inner();
-
         // Verify a plugin is loaded and get the name
         let plugin_name = {
             let plugin_guard = self
@@ -1139,65 +1143,120 @@ impl AudioHost {
                 .unwrap_or_else(|| "Unknown Plugin".to_string())
         };
 
-        // Reset close signal for the new editor session
-        self.editor_close_signal
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        // Close any existing editor first (does not join — thread stays alive)
+        self.close_editor_inner();
 
-        // Clone Arc references for the GUI thread
-        let plugin_arc = Arc::clone(&self.plugin);
-        let close_signal = Arc::clone(&self.editor_close_signal);
+        // If the persistent editor thread is already running, re-open using the existing loop.
+        // The thread must never exit (winit allows only one EventLoop per process).
+        let has_thread = {
+            let thread_guard = self.editor_thread.lock().map_err(|e| format!("Lock error: {}", e))?;
+            if let Some(handle) = thread_guard.as_ref() {
+                if handle.is_finished() {
+                    return Err("Editor thread exited unexpectedly; restart the MCP server to recover.".to_string());
+                }
+                if let Ok(mut name) = self.editor_plugin_name.write() {
+                    *name = plugin_name.clone();
+                }
+                self.editor_close_signal.store(false, Ordering::Relaxed);
+                let was_open = self.editor_is_open.load(Ordering::Relaxed);
+                if was_open {
+                    let response = serde_json::json!({
+                        "status": "opened",
+                        "message": "Editor window is already open.",
+                    });
+                    return Ok(serde_json::to_string_pretty(&response).unwrap());
+                }
+                true
+            } else {
+                false
+            }
+        };
 
-        // Channel: GUI thread signals when editor is open (or failed).
+        if !has_thread {
+            return self.start_editor_thread(plugin_name);
+        }
+
+        // Wait for the persistent loop to create the window
+        for _ in 0..500 {
+            if self.editor_is_open.load(Ordering::Relaxed) {
+                let response = serde_json::json!({
+                    "status": "opened",
+                    "message": "Editor window is now open. You may continue — the window stays open in the background.",
+                });
+                return Ok(serde_json::to_string_pretty(&response).unwrap());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        Err("Timed out waiting for editor window to open".to_string())
+    }
+
+    fn start_editor_thread(&self, plugin_name: String) -> Result<String, String> {
         let (opened_tx, opened_rx) = std::sync::mpsc::channel();
 
-        // Spawn dedicated GUI thread
-        let opened_tx_clone = opened_tx.clone();
-        let handle = std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                gui::open_editor_window(plugin_arc, plugin_name, opened_tx_clone, close_signal)
-            }));
+        let handle = {
+            let thread_guard = self.editor_thread.lock().map_err(|e| format!("Lock error: {}", e))?;
+            if thread_guard.is_some() {
+                // Another caller beat us to spawning; reuse the existing thread
+                drop(thread_guard);
+                return self.open_editor();
+            }
+            if let Ok(mut name) = self.editor_plugin_name.write() {
+                *name = plugin_name.clone();
+            }
+            self.editor_close_signal.store(false, Ordering::Relaxed);
+            self.editor_is_open.store(false, Ordering::Relaxed);
 
-            match result {
-                Ok(Ok(())) => {
-                    info!("Editor window closed normally");
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("Editor window failed: {}", e);
-                    let _ = opened_tx.send(Err(format!("Editor error: {}", e)));
-                }
-                Err(panic_payload) => {
-                    let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+            let plugin_arc = Arc::clone(&self.plugin);
+            let name_arc = Arc::clone(&self.editor_plugin_name);
+            let close_signal = Arc::clone(&self.editor_close_signal);
+            let is_open = Arc::clone(&self.editor_is_open);
+            std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    gui::open_editor_window_persistent(
+                        plugin_arc,
+                        name_arc,
+                        opened_tx,
+                        close_signal,
+                        is_open,
+                    )
+                }));
+
+                if let Ok(Err(e)) = result {
+                    tracing::error!("Persistent editor loop error: {}", e);
+                } else if let Err(payload) = result {
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
                         (*s).to_string()
-                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
                         s.clone()
                     } else {
                         "non-string panic payload".to_string()
                     };
-                    tracing::error!("GUI thread panicked: {}", msg);
-                    let _ = opened_tx.send(Err(format!("GUI thread panicked: {}", msg)));
+                    tracing::error!("Editor thread panicked: {}", msg);
                 }
-            };
-        });
+            })
+        };
 
-        // Store the thread handle
-        if let Ok(mut thread_guard) = self.editor_thread.lock() {
+        {
+            let mut thread_guard = self.editor_thread.lock().map_err(|e| format!("Lock error: {}", e))?;
             *thread_guard = Some(handle);
         }
 
-        // Wait only until the editor window is created (or fails), then return.
-        let opened_result = opened_rx
-            .recv()
-            .map_err(|_| "GUI thread disconnected before signalling editor state".to_string())?;
-
-        match opened_result {
-            Ok(()) => {
+        match opened_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(())) => {
                 let response = serde_json::json!({
                     "status": "opened",
                     "message": "Editor window is now open. You may continue — the window stays open in the background.",
                 });
                 Ok(serde_json::to_string_pretty(&response).unwrap())
             }
-            Err(e) => Err(e),
+            Ok(Err(e)) => Err(e),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err("Timed out waiting for editor window to open".to_string())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err("Editor thread exited before reporting open state".to_string())
+            }
         }
     }
 
@@ -1221,31 +1280,32 @@ impl AudioHost {
 
 impl AudioHost {
     /// Internal helper to close any running editor. Returns true if an editor was running.
+    /// Does NOT join the thread — it must keep running so we can reopen (winit allows only
+    /// one EventLoop per process).
     fn close_editor_inner(&self) -> bool {
-        // Signal the event loop to exit
-        self.editor_close_signal
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let has_thread = self
+            .editor_thread
+            .lock()
+            .ok()
+            .map(|g| g.is_some())
+            .unwrap_or(false);
 
-        // Wait for the GUI thread to finish (with timeout)
-        let handle = {
-            let mut thread_guard = match self.editor_thread.lock() {
-                Ok(g) => g,
-                Err(_) => return false,
-            };
-            thread_guard.take()
-        };
-
-        if let Some(h) = handle {
-            // The editor thread MUST be joined to ensure all resources are released
-            // before we proceed to drop the plugin instance. A timeout is dangerous here,
-            // as it could leave the GUI thread running with a dangling pointer.
-            if let Err(e) = h.join() {
-                warn!("Editor thread panicked on close: {:?}", e);
-            }
-            true
-        } else {
-            false
+        if !has_thread {
+            return false;
         }
+
+        let was_open = self.editor_is_open.load(Ordering::Relaxed);
+        self.editor_close_signal.store(true, Ordering::Relaxed);
+
+        // Wait for the persistent loop to cleanup and set is_open=false (up to 2s)
+        for _ in 0..200 {
+            if !self.editor_is_open.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        was_open
     }
 
     /// Fetch all writable, visible parameters with live values from the plugin.

@@ -46,6 +46,9 @@ struct RegisterRequest {
 #[derive(Debug, Deserialize)]
 struct HeartbeatRequest {
     instance_id: String,
+    /// Optional: update the displayed name (e.g. when plugin load/unload changes).
+    #[serde(default)]
+    mcp_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -737,6 +740,9 @@ async fn heartbeat(
     let mut reg = state.registry.write().await;
     if let Some(inst) = reg.get_mut(&req.instance_id) {
         inst.last_seen_ms = now_ms;
+        if let Some(name) = req.mcp_name {
+            inst.mcp_name = name;
+        }
         (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
     } else {
         (
