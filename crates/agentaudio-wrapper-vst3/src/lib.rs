@@ -1,3 +1,6 @@
+mod controller;
+mod param_scoring;
+
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -107,7 +110,7 @@ impl Default for EditorRuntime {
 }
 
 #[derive(Clone)]
-struct SharedState {
+pub(crate) struct SharedState {
     instance_id: Arc<String>,
     child_plugin: Arc<Mutex<Option<PluginInstance>>>,
     loaded_info: Arc<RwLock<Option<PluginInfo>>>,
@@ -117,6 +120,11 @@ struct SharedState {
     endpoint: Arc<RwLock<Option<String>>>,
     param_queue: Arc<ArrayQueue<QueuedParamChange>>,
     editor_runtime: Arc<Mutex<EditorRuntime>>,
+    /// Sender for controller thread (IEditController operations). None until MCP server starts.
+    controller_tx: Arc<RwLock<Option<std::sync::mpsc::SyncSender<(
+        controller::ControllerCmd,
+        std::sync::mpsc::SyncSender<Result<String, String>>,
+    )>>>>,
 }
 
 impl PartialEq for SharedState {
@@ -143,7 +151,22 @@ impl SharedState {
             endpoint: Arc::new(RwLock::new(None)),
             param_queue: Arc::new(ArrayQueue::new(PARAM_QUEUE_CAPACITY)),
             editor_runtime: Arc::new(Mutex::new(EditorRuntime::default())),
+            controller_tx: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Run an IEditController command on the dedicated controller thread.
+    /// Returns Err if controller is not started (MCP server not initialized) or command fails.
+    fn run_on_controller(&self, cmd: controller::ControllerCmd) -> Result<String, String> {
+        let tx = self
+            .controller_tx
+            .read()
+            .map_err(|e| format!("Lock error: {e}"))?
+            .clone()
+            .ok_or_else(|| "Controller thread not started (MCP server not initialized)".to_string())?;
+        let (resp_tx, resp_rx) = std::sync::mpsc::sync_channel(0);
+        tx.send((cmd, resp_tx)).map_err(|e| format!("Controller send failed: {e}"))?;
+        resp_rx.recv().map_err(|e| format!("Controller response failed: {e}"))?
     }
 
     fn mcp_name(&self) -> String {
@@ -192,31 +215,36 @@ impl SharedState {
     }
 
     fn close_editor(&self) -> bool {
-        let (close_signal, join_handle, was_open) = match self.editor_runtime.lock() {
-            Ok(mut editor) => (
+        let (close_signal, has_thread, was_open) = match self.editor_runtime.lock() {
+            Ok(editor) => (
                 Arc::clone(&editor.close_signal),
-                editor.thread.take(),
+                editor.thread.is_some(),
                 editor.is_open.load(Ordering::Relaxed),
             ),
             Err(_) => return false,
         };
 
-        let Some(join_handle) = join_handle else {
+        if !has_thread {
             return false;
-        };
+        }
 
         close_signal.store(true, Ordering::Relaxed);
 
-        // Wait for the persistent loop to see close_signal, cleanup, and exit (up to 2s).
+        // Wait for the persistent loop to see close_signal, cleanup editor, and set is_open=false
+        // (up to 2s). Do NOT join the thread — it must keep running so we can reopen later.
+        // Winit allows only one EventLoop per process; exiting the thread would cause
+        // RecreationAttempt on the next open.
         for _ in 0..200 {
-            if join_handle.is_finished() {
+            let is_open = self
+                .editor_runtime
+                .lock()
+                .map(|e| e.is_open.load(Ordering::Relaxed))
+                .unwrap_or(false);
+            if !is_open {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-
-        // Join so the editor thread has fully dropped IPlugView before we may unload the plugin.
-        let _ = join_handle.join();
 
         was_open
     }
@@ -231,17 +259,17 @@ impl SharedState {
             .ok_or_else(|| "No child plugin loaded".to_string())?;
 
         // If the persistent editor thread is already running, re-open using the existing loop.
-        // If the thread has exited (e.g. after close_editor or a crash), clear it and spawn a new one.
+        // The thread must never exit (winit allows only one EventLoop per process).
+        // If the thread has finished (panic), we cannot recover — return an error.
         {
-            let mut editor = self
+            let editor = self
                 .editor_runtime
                 .lock()
                 .map_err(|e| format!("Lock error: {e}"))?;
             if let Some(handle) = editor.thread.as_ref() {
                 if handle.is_finished() {
-                    editor.thread = None;
-                    drop(editor);
-                    return self.start_editor_thread(plugin_name);
+                    return Err("Editor thread exited unexpectedly; reload the wrapper to recover."
+                        .to_string());
                 }
                 if let Ok(mut name) = editor.plugin_name.write() {
                     *name = plugin_name.clone();
@@ -602,20 +630,6 @@ impl WrapperMcpServer {
         }
     }
 
-    fn with_child_plugin<R>(
-        &self,
-        f: impl FnOnce(&mut PluginInstance) -> Result<R, String>,
-    ) -> Result<R, String> {
-        let mut guard = self
-            .shared
-            .child_plugin
-            .lock()
-            .map_err(|e| format!("Lock error: {e}"))?;
-        let plugin = guard
-            .as_mut()
-            .ok_or_else(|| "No child plugin loaded".to_string())?;
-        f(plugin)
-    }
 }
 
 #[tool_router]
@@ -653,42 +667,8 @@ impl WrapperMcpServer {
         &self,
         Parameters(req): Parameters<ListParamsRequest>,
     ) -> Result<String, String> {
-        self.with_child_plugin(|plugin| {
-            let count = plugin.get_parameter_count();
-            let prefix_lower = req
-                .prefix
-                .as_ref()
-                .map(|p| p.to_lowercase())
-                .filter(|p| !p.is_empty());
-            let mut parameters = Vec::new();
-            for i in 0..count {
-                if let Ok(info) = plugin.get_parameter_info(i) {
-                    if info.is_writable() && !info.is_hidden() {
-                        if let Some(ref pre) = prefix_lower {
-                            if !info.title.to_lowercase().starts_with(pre) {
-                                continue;
-                            }
-                        }
-                        let value = plugin.get_parameter(info.id);
-                        let display = plugin
-                            .get_parameter_display(info.id)
-                            .unwrap_or_else(|_| format!("{value:.3}"));
-                        parameters.push(serde_json::json!({
-                            "id": info.id,
-                            "name": info.title,
-                            "value": value,
-                            "display": display,
-                        }));
-                    }
-                }
-            }
-
-            let response = serde_json::json!({
-                "count": parameters.len(),
-                "parameters": parameters,
-            });
-            serde_json::to_string_pretty(&response)
-                .map_err(|e| format!("Serialization failed: {e}"))
+        self.shared.run_on_controller(controller::ControllerCmd::ListParams {
+            prefix: req.prefix.clone(),
         })
     }
 
@@ -696,36 +676,7 @@ impl WrapperMcpServer {
         description = "List logical parameter groups (e.g. 'Filter 1', 'Envelope 1') with counts. Use before list_params to discover available sections."
     )]
     fn list_param_groups(&self) -> Result<String, String> {
-        self.with_child_plugin(|plugin| {
-            let count = plugin.get_parameter_count();
-            let mut group_counts: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
-            for i in 0..count {
-                if let Ok(info) = plugin.get_parameter_info(i) {
-                    if info.is_writable() && !info.is_hidden() {
-                        let group = param_group_prefix(&info.title);
-                        *group_counts.entry(group).or_default() += 1;
-                    }
-                }
-            }
-            let mut groups: Vec<serde_json::Value> = group_counts
-                .into_iter()
-                .map(|(group, count)| serde_json::json!({ "group": group, "count": count }))
-                .collect();
-            groups.sort_by(|a, b| {
-                a.get("group")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .cmp(b.get("group").and_then(|v| v.as_str()).unwrap_or_default())
-            });
-            let group_count = groups.len();
-            let response = serde_json::json!({
-                "groups": groups,
-                "count": group_count,
-            });
-            serde_json::to_string_pretty(&response)
-                .map_err(|e| format!("Serialization failed: {e}"))
-        })
+        self.shared.run_on_controller(controller::ControllerCmd::ListParamGroups)
     }
 
     #[tool(
@@ -735,37 +686,8 @@ impl WrapperMcpServer {
         &self,
         Parameters(req): Parameters<SearchParamsRequest>,
     ) -> Result<String, String> {
-        self.with_child_plugin(|plugin| {
-            let count = plugin.get_parameter_count();
-            let query_lower = req.query.to_lowercase();
-            let mut matches = Vec::new();
-            for i in 0..count {
-                if let Ok(info) = plugin.get_parameter_info(i) {
-                    if info.is_writable() && !info.is_hidden()
-                        && info.title.to_lowercase().contains(&query_lower)
-                    {
-                        let value = plugin.get_parameter(info.id);
-                        let display = plugin
-                            .get_parameter_display(info.id)
-                            .unwrap_or_else(|_| format!("{value:.3}"));
-                        matches.push(serde_json::json!({
-                            "id": info.id,
-                            "name": info.title,
-                            "value": value,
-                            "display": display,
-                            "units": info.units,
-                            "step_count": info.step_count
-                        }));
-                    }
-                }
-            }
-            let response = serde_json::json!({
-                "query": req.query,
-                "matches": matches,
-                "count": matches.len()
-            });
-            serde_json::to_string_pretty(&response)
-                .map_err(|e| format!("Serialization failed: {e}"))
+        self.shared.run_on_controller(controller::ControllerCmd::SearchParams {
+            query: req.query,
         })
     }
 
@@ -776,62 +698,9 @@ impl WrapperMcpServer {
         &self,
         Parameters(req): Parameters<GetParamsByNameRequest>,
     ) -> Result<String, String> {
-        let params = self.with_child_plugin(|plugin| {
-            let count = plugin.get_parameter_count();
-            let mut parameters = Vec::new();
-            for i in 0..count {
-                if let Ok(info) = plugin.get_parameter_info(i) {
-                    if info.is_writable() && !info.is_hidden() {
-                        let value = plugin.get_parameter(info.id);
-                        let display = plugin
-                            .get_parameter_display(info.id)
-                            .unwrap_or_else(|_| format!("{value:.3}"));
-                        parameters.push(serde_json::json!({
-                            "id": info.id,
-                            "name": info.title,
-                            "value": value,
-                            "display": display,
-                        }));
-                    }
-                }
-            }
-            Ok::<_, String>(parameters)
-        })?;
-        let mut results = Vec::new();
-        for name in req.names {
-            let (primary, aliases) = query_terms_for_scoring(&name);
-            let mut scored: Vec<(u32, serde_json::Value)> = params
-                .iter()
-                .filter_map(|p| {
-                    let s = score_param(p, &primary, &aliases);
-                    if s > 0 {
-                        Some((s, p.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
-            if let Some((score, best_match)) = scored.first() {
-                results.push(serde_json::json!({
-                    "query": name,
-                    "match": best_match,
-                    "score": score
-                }));
-            } else {
-                results.push(serde_json::json!({
-                    "query": name,
-                    "match": serde_json::Value::Null,
-                    "score": 0
-                }));
-            }
-        }
-        let response = serde_json::json!({
-            "results": results,
-            "count": results.len()
-        });
-        serde_json::to_string_pretty(&response)
-            .map_err(|e| format!("Serialization failed: {e}"))
+        self.shared.run_on_controller(controller::ControllerCmd::GetParamsByName {
+            names: req.names,
+        })
     }
 
     #[tool(
@@ -842,37 +711,7 @@ impl WrapperMcpServer {
         Parameters(req): Parameters<GetPatchStateRequest>,
     ) -> Result<String, String> {
         let diff_only = req.diff_only.unwrap_or(true);
-        self.with_child_plugin(|plugin| {
-            let count = plugin.get_parameter_count();
-            let mut result = Vec::new();
-            for i in 0..count {
-                if let Ok(info) = plugin.get_parameter_info(i) {
-                    if !info.is_writable() || info.is_hidden() {
-                        continue;
-                    }
-                    let value = plugin.get_parameter(info.id);
-                    if diff_only && (value - info.default_normalized).abs() < 1e-4 {
-                        continue;
-                    }
-                    let display = plugin
-                        .get_parameter_display(info.id)
-                        .unwrap_or_else(|_| format!("{value:.3}"));
-                    result.push(serde_json::json!({
-                        "id": info.id,
-                        "name": info.title,
-                        "value": value,
-                        "display": display,
-                        "default": info.default_normalized
-                    }));
-                }
-            }
-            let response = serde_json::json!({
-                "parameters": result,
-                "count": result.len(),
-            });
-            serde_json::to_string_pretty(&response)
-                .map_err(|e| format!("Serialization failed: {e}"))
-        })
+        self.shared.run_on_controller(controller::ControllerCmd::GetPatchState { diff_only })
     }
 
     #[tool(description = "Queue one realtime parameter update for a single knob/parameter change.")]
@@ -983,31 +822,10 @@ impl WrapperMcpServer {
         &self,
         Parameters(req): Parameters<PreviewVstParameterValuesRequest>,
     ) -> Result<String, String> {
-        let raw = self.list_params(Parameters(ListParamsRequest::default()))?;
-        let params = parse_params_from_list_result(&raw)?;
-        let limit = req.limit.unwrap_or(20).max(1);
-
-        let selected: Vec<serde_json::Value> = if let Some(ids) = req.ids {
-            params
-                .iter()
-                .filter(|p| {
-                    p.get("id")
-                        .and_then(|v| v.as_u64())
-                        .map(|id| ids.contains(&(id as u32)))
-                        .unwrap_or(false)
-                })
-                .take(limit)
-                .cloned()
-                .collect()
-        } else {
-            params.iter().take(limit).cloned().collect()
-        };
-
-        let response = serde_json::json!({
-            "count": selected.len(),
-            "values": selected,
-        });
-        serde_json::to_string_pretty(&response).map_err(|e| format!("Serialization failed: {e}"))
+        self.shared.run_on_controller(controller::ControllerCmd::PreviewParams {
+            ids: req.ids,
+            limit: req.limit.unwrap_or(20).max(1),
+        })
     }
 
     #[tool(
@@ -1017,47 +835,7 @@ impl WrapperMcpServer {
         &self,
         Parameters(req): Parameters<GetParamInfoRequest>,
     ) -> Result<String, String> {
-        self.with_child_plugin(|plugin| {
-            let count = plugin.get_parameter_count();
-            let mut info_opt = None;
-            for i in 0..count {
-                if let Ok(info) = plugin.get_parameter_info(i) {
-                    if info.id == req.id {
-                        info_opt = Some(info);
-                        break;
-                    }
-                }
-            }
-            let info = info_opt.ok_or_else(|| format!("Parameter id {} not found", req.id))?;
-
-            let default_display = plugin
-                .get_parameter_display_for_value(info.id, info.default_normalized)
-                .map_err(|e| format!("Failed to get default display: {e}"))?;
-
-            let probe_vals = [0.0, 0.25, 0.5, 0.75, 1.0];
-            let mut range_probe = serde_json::Map::new();
-            for v in probe_vals {
-                let key = format!("{:.2}", v);
-                let display = plugin
-                    .get_parameter_display_for_value(info.id, v)
-                    .unwrap_or_else(|_| format!("{v:.3}"));
-                range_probe.insert(key, serde_json::Value::String(display));
-            }
-
-            let response = serde_json::json!({
-                "id": info.id,
-                "name": info.title,
-                "units": info.units,
-                "default_normalized": info.default_normalized,
-                "default_display": default_display,
-                "step_count": info.step_count,
-                "is_writable": info.is_writable(),
-                "is_bypass": info.is_bypass(),
-                "range_probe": range_probe,
-            });
-            serde_json::to_string_pretty(&response)
-                .map_err(|e| format!("Serialization failed: {e}"))
-        })
+        self.shared.run_on_controller(controller::ControllerCmd::GetParamInfo { id: req.id })
     }
 
     #[tool(
@@ -1068,17 +846,8 @@ impl WrapperMcpServer {
         Parameters(req): Parameters<SavePresetRequest>,
     ) -> Result<String, String> {
         let path = PathBuf::from(expand_tilde(&req.path));
-        self.with_child_plugin(|plugin| {
-            vst3_mcp_host::preset::state::save_plugin_state(plugin, &path)
-                .map_err(|e| format!("Failed to save preset: {e}"))?;
-            let response = serde_json::json!({
-                "status": "saved",
-                "path": path.to_string_lossy(),
-                "timestamp_ms": now_ms(),
-            });
-            serde_json::to_string_pretty(&response)
-                .map_err(|e| format!("Serialization failed: {e}"))
-        })
+        self.shared
+            .run_on_controller(controller::ControllerCmd::SavePreset { path })
     }
 
     #[tool(description = "Load plugin state from a .vstpreset file. Requires a plugin already loaded in this instance.")]
@@ -1087,17 +856,8 @@ impl WrapperMcpServer {
         Parameters(req): Parameters<LoadPresetRequest>,
     ) -> Result<String, String> {
         let path = PathBuf::from(expand_tilde(&req.path));
-        self.with_child_plugin(|plugin| {
-            vst3_mcp_host::preset::state::restore_plugin_state(plugin, &path)
-                .map_err(|e| format!("Failed to load preset: {e}"))?;
-            let response = serde_json::json!({
-                "status": "loaded",
-                "path": path.to_string_lossy(),
-                "timestamp_ms": now_ms(),
-            });
-            serde_json::to_string_pretty(&response)
-                .map_err(|e| format!("Serialization failed: {e}"))
-        })
+        self.shared
+            .run_on_controller(controller::ControllerCmd::LoadPreset { path })
     }
 
     #[tool(
@@ -1240,6 +1000,14 @@ struct EmbeddedMcpServerHandle {
 
 impl EmbeddedMcpServerHandle {
     fn start(shared: SharedState) -> Result<Self, String> {
+        // Start controller thread for IEditController operations (VST3 threading compliance).
+        let controller_tx = controller::spawn(shared.clone());
+        {
+            if let Ok(mut tx_guard) = shared.controller_tx.write() {
+                *tx_guard = Some(controller_tx.clone());
+            }
+        }
+
         let cancel = CancellationToken::new();
         let child_cancel = cancel.child_token();
         let (addr_tx, addr_rx) = std::sync::mpsc::channel();
@@ -1346,12 +1114,15 @@ fn start_router_registration_thread(
             .send();
 
         // Heartbeat loop; routerd TTL pruning keeps the registry tidy even if we never unregister.
+        // Include mcp_name so list_instances reflects current loaded plugin (not stale "Unloaded").
         while !cancel.is_cancelled() {
             std::thread::sleep(std::time::Duration::from_secs(3));
+            let mcp_name = shared.mcp_name();
             let _ = client
                 .post(&heartbeat_url)
                 .json(&serde_json::json!({
                     "instance_id": shared.instance_id.to_string(),
+                    "mcp_name": mcp_name,
                 }))
                 .send();
         }
@@ -1780,7 +1551,7 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1799,87 +1570,6 @@ fn hex_to_tuid(hex: &str) -> Result<[i8; 16], String> {
         tuid[i] = byte as i8;
     }
     Ok(tuid)
-}
-
-fn param_group_prefix(name: &str) -> String {
-    let parts: Vec<&str> = name.splitn(3, ' ').collect();
-    if parts.len() >= 2 && parts[1].parse::<u32>().is_ok() {
-        format!("{} {}", parts[0], parts[1])
-    } else {
-        parts.first().map(|s| (*s).to_string()).unwrap_or_default()
-    }
-}
-
-/// Returns (primary_terms, alias_terms) for scoring.
-fn query_terms_for_scoring(query: &str) -> (Vec<String>, Vec<String>) {
-    let lower = query.to_lowercase();
-    let primary: Vec<String> = lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(ToString::to_string)
-        .collect();
-
-    let mut aliases: Vec<String> = Vec::new();
-    if lower.contains("brighter") {
-        aliases.extend(
-            ["bright", "brightness", "treble", "presence"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
-    }
-    if lower.contains("harsh") {
-        aliases.extend(
-            ["harsh", "resonance", "q", "presence"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
-    }
-    if lower.contains("reverb") {
-        aliases.extend(["room", "wet"].iter().map(|s| s.to_string()));
-    }
-
-    aliases.retain(|a| !primary.contains(a));
-    aliases.sort();
-    aliases.dedup();
-    (primary, aliases)
-}
-
-fn score_param(param: &serde_json::Value, primary: &[String], aliases: &[String]) -> u32 {
-    let name = param
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_lowercase();
-    let name_words: Vec<&str> = name.split_whitespace().collect();
-    let display = param
-        .get("display")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_lowercase();
-    let mut score = 0u32;
-
-    for term in primary {
-        if name == *term {
-            score += 2000;
-        } else if name_words.iter().any(|w| *w == term.as_str()) {
-            score += 100;
-        } else if name.starts_with(term.as_str()) {
-            score += 80;
-        } else if name.contains(term.as_str()) {
-            score += 40;
-        }
-        if display.contains(term.as_str()) {
-            score += 5;
-        }
-    }
-    for term in aliases {
-        if name_words.iter().any(|w| *w == term.as_str()) {
-            score += 10;
-        } else if name.contains(term.as_str()) {
-            score += 3;
-        }
-    }
-    score
 }
 
 fn query_terms(query: &str) -> Vec<String> {

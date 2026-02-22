@@ -22,6 +22,7 @@ use vst3::Steinberg::{IPlugFrame, IPlugView, IPlugViewTrait, ViewRect, kResultOk
 use vst3::com_scrape_types::{ComPtr, ComWrapper};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
+use winit::error::EventLoopError;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -818,6 +819,24 @@ impl Drop for EditorState {
     }
 }
 
+/// Map winit EventLoopError to a user-friendly message.
+fn event_loop_error_message(e: EventLoopError) -> String {
+    use EventLoopError::*;
+    match &e {
+        RecreationAttempt => "Editor event loop was already created in this process. \
+            This usually means the previous editor session did not shut down correctly."
+            .to_string(),
+        NotSupported(inner) => format!(
+            "Display backend not supported: {}. \
+            On Linux, ensure X11 libraries are installed (libX11, libxcb, etc.) and DISPLAY is set. \
+            If using Wayland, try unsetting WAYLAND_DISPLAY to force X11.",
+            inner
+        ),
+        Os(inner) => format!("Display/OS error: {}", inner),
+        ExitFailure(code) => format!("Event loop exit failure: {}", code),
+    }
+}
+
 /// Open the plugin's editor window on the current thread.
 ///
 /// This function creates a winit event loop on the current thread and
@@ -859,7 +878,7 @@ pub fn open_editor_window(
 
     let event_loop = builder
         .build()
-        .map_err(|e| format!("Failed to create event loop: {}", e))?;
+        .map_err(event_loop_error_message)?;
 
     // Set control flow: poll continuously for timer/FD dispatch
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -870,7 +889,7 @@ pub fn open_editor_window(
     // Run the event loop (blocks until window closes or close_signal is set)
     event_loop
         .run_app(&mut app)
-        .map_err(|e| format!("Event loop error: {}", e))?;
+        .map_err(event_loop_error_message)?;
 
     info!("Editor window closed");
     Ok(())
@@ -1006,15 +1025,14 @@ impl ApplicationHandler for PersistentEditorApp {
         if self.close_signal.load(std::sync::atomic::Ordering::Relaxed) {
             if self.state.is_some() {
                 self.cleanup_editor();
-                // Exit so the wrapper can join this thread before dropping the plugin.
-                // Without this, unload could set plugin=None while we still held IPlugView.
-                event_loop.exit();
+                // Do NOT exit — keep the loop running so we can reopen later.
+                // Winit allows only one EventLoop per process; exiting would prevent any
+                // future editor opens from succeeding (RecreationAttempt).
             } else if let Some(tx) = self.opened_tx.take() {
-                // Close requested before we opened; signal failure and exit so caller gets response
+                // Close requested before we opened; signal failure but keep looping
                 let _ = tx.send(Err(
                     "Editor close requested before window could open".to_string(),
                 ));
-                event_loop.exit();
             }
         } else if self.state.is_none() {
             self.try_open_editor(event_loop);
@@ -1061,7 +1079,7 @@ pub fn open_editor_window_persistent(
     let event_loop = match builder.build() {
         Ok(el) => el,
         Err(e) => {
-            let msg = format!("Failed to create event loop: {}", e);
+            let msg = event_loop_error_message(e);
             let _ = opened_tx.send(Err(msg.clone()));
             return Err(msg);
         }
@@ -1080,7 +1098,7 @@ pub fn open_editor_window_persistent(
 
     event_loop
         .run_app(&mut app)
-        .map_err(|e| format!("Event loop error: {}", e))?;
+        .map_err(event_loop_error_message)?;
 
     Ok(())
 }
